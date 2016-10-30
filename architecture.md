@@ -11,8 +11,30 @@ Have a type for application messages that composes underlying protocols & possib
 Abstract algo logic into functions that return vectors of {PID, message} intead of sending. 
 
 
-For the testing framework, the idea is that each protocol has a generic (handleMessage :: Message -> m [(Pid, Message)]), as well as a few protocol-specific entry points (e.g. lock :: m [(Pid, Message)]) (where m indicates access to some protocol-specific local state).
-A test script would be be a list of events like (ProtocolSpecificEntry a | AdvanceTime | RestrictPerTimeStepChannelCapacity (Pid, Pid) Int | Crash Pid | Recover Pid | ...).
-Interpreting a test script could be done by making a HashMap<Pid, ProtocolState> for the global state, and a HashMap<(Pid,Pid), (usize, Vec<Message>)> for the channels, and then updating these appropriately via handle_message for each message.
-ProtocolSpecificEntry may just be an escape hatch into some sort of closure that returns a vector of {PID, Message}.
+For the testing framework, the idea is that each protocol has a generic `(handleMessage :: Message -> m [(Pid, Message)])`, as well as a few protocol-specific entry points (e.g. `lock :: m [(Pid, Message)]`) (where m indicates access to some protocol-specific local state).
+A test script would be be a list of events like `(ProtocolSpecificEntry a | AdvanceTime | RestrictPerTimeStepChannelCapacity (Pid, Pid) Int | Crash Pid | Recover Pid | ...)`.
+Interpreting a test script could be done by making a `HashMap<Pid, ProtocolState>` for the global state, and a `HashMap<(Pid,Pid), (usize, Vec<Message>)>` for the channels, and then updating these appropriately via `handle_message` for each message.
+`ProtocolSpecificEntry` may just be an escape hatch into some sort of closure that returns a vector of {PID, Message}.
 
+e.g. testing
+```rust
+pub trait MutexAlgorithm<Resource, Message> {
+    fn request(&mut self) -> (mpsc::Receiver<Resource>, Vec<(Pid, Message)>);
+    fn release(&mut self) -> Vec<(Pid, Message)>;
+    fn handle_message(&mut self, &PeerContext, Message) -> Vec<(Pid, Message)>;
+}
+```
+may look like:
+```rust
+run_script([
+    ProtocolSpecificEntry(|states| {
+        let (recv, tosend) = states[0].request();
+        drop(recv)
+        tosend
+    }),
+    AdvanceTime,
+    ProtocolSpecificEntry(|state| states[0].release()),
+    AdvanceTime,
+    ], [pid1_state, pid2_state]
+);
+```
