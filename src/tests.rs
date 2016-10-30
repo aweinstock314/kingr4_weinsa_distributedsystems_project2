@@ -36,36 +36,65 @@ fn run_script<S: HandleMessage>(script: &[TestScriptEntry<S>], states: &mut Hash
 }
 
 // PingPong{State,Message} form a simple protocol to demonstrate the testing framework
-struct PingPongState { pid: usize }
+struct PingPongState {
+    pid: usize,
+    pingcounter: usize,
+    pongcounter: usize,
+}
 #[derive(Debug, Clone)]
 enum PingPongMessage { Ping(usize), Pong }
+
+impl PingPongState {
+    fn new(pid: usize) -> PingPongState {
+        PingPongState {
+            pid: pid, pingcounter: 0, pongcounter: 0,
+        }
+    }
+}
 
 impl HandleMessage for PingPongState {
     type Pid = usize;
     type Message = PingPongMessage;
     fn handle_message(&mut self, m: &Self::Message) -> Vec<(Self::Pid, Self::Message)> {
         println!("{}: Got a {:?}", self.pid, m);
-        if let &PingPongMessage::Ping(replypid) = m {
-            println!("{}: replying to {}", self.pid, replypid);
-            vec![(replypid, PingPongMessage::Pong)]
-        } else {
-            vec![]
+        match m {
+            &PingPongMessage::Ping(replypid) => {
+                println!("{}: replying to {}", self.pid, replypid);
+                self.pingcounter += 1;
+                vec![(replypid, PingPongMessage::Pong)]
+            },
+            &PingPongMessage::Pong => {
+                self.pongcounter += 1;
+                vec![]
+            },
         }
     }
 }
 
 #[test]
 fn ping_pong_protocol() {
-    let mut state1 = PingPongState { pid: 1 };
-    let mut state2 = PingPongState { pid: 2 };
+    let mut state1 = PingPongState::new(1);
+    let mut state2 = PingPongState::new(2);
     let mut states = HashMap::new();
     states.insert(1, &mut state1);
     states.insert(2, &mut state2);
+    let makeassert = |a,b,c,d| { TestScriptEntry::Closure(Box::new(move |s: &mut HashMap<usize, &mut PingPongState>| {
+        let s1 = s.get(&1).unwrap();
+        let s2 = s.get(&2).unwrap();
+        assert_eq!(s1.pingcounter, a);
+        assert_eq!(s1.pongcounter, b);
+        assert_eq!(s2.pingcounter, c);
+        assert_eq!(s2.pongcounter, d);
+        vec![]
+    }))};
     run_script::<PingPongState>({
         use self::TestScriptEntry::*;
         &[
         Closure(Box::new(|_| vec![(2, PingPongMessage::Ping(1))])),
+        makeassert(0,0,0,0),
         AdvanceRound,
+        makeassert(0,0,1,0),
         AdvanceRound,
+        makeassert(0,1,1,0),
         ]}, &mut states);
 }
