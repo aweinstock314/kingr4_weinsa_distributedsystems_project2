@@ -36,6 +36,8 @@ pub use tokio_core::reactor::{Core, Handle};
 pub type Pid = usize;
 pub type Nodes = HashMap<Pid, (SocketAddr, u16)>;
 
+pub mod algos;
+pub mod broadcasts;
 pub mod framing_helpers;
 pub mod parsers;
 pub mod tests;

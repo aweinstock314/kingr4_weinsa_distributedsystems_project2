@@ -1,13 +1,8 @@
+use algos::HandleMessage;
+use broadcasts::{BroadcastAlgorithm, SendAll};
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::hash::Hash;
-
-// HandleMessage trait for protocols that can handle messages
-trait HandleMessage {
-    type Pid;
-    type Message;
-    fn handle_message(&mut self, m: &Self::Message) -> Vec<(Self::Pid, Self::Message)>;
-}
 
 // TestScriptEntry and run_script form a testing framework
 enum TestScriptEntry<S: HandleMessage> {
@@ -97,4 +92,29 @@ fn ping_pong_protocol() {
         AdvanceRound,
         makeassert(0,1,1,0),
         ]}, &mut states);
+}
+
+#[test]
+fn test_sendall() {
+    let mut state1 = PingPongState::new(1);
+    let mut state2 = PingPongState::new(2);
+    let mut state3 = PingPongState::new(3);
+
+    let mut bcast1 = SendAll::new(1usize, [2,3].into_iter().map(|&i| i).collect());
+    let mut bcast2 = SendAll::new(2usize, [1,3].into_iter().map(|&i| i).collect());
+    let mut bcast3 = SendAll::new(3usize, [1,2].into_iter().map(|&i| i).collect());
+    bcast1.set_on_deliver(Box::new(move |m| { state1.handle_message(m); }));
+    bcast2.set_on_deliver(Box::new(move |m| { state2.handle_message(m); }));
+    bcast3.set_on_deliver(Box::new(move |m| { state3.handle_message(m); }));
+
+    let mut states = HashMap::new();
+    states.insert(1, &mut bcast1);
+    states.insert(2, &mut bcast2);
+    states.insert(3, &mut bcast3);
+    run_script(&[
+        TestScriptEntry::Closure(Box::new(|states: &mut HashMap<usize, &mut SendAll<_,_>>| {
+            states.get_mut(&1).unwrap().broadcast(&PingPongMessage::Ping(1))
+        })),
+        TestScriptEntry::AdvanceRound,
+    ], &mut states);
 }
