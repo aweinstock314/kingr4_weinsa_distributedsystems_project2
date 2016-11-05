@@ -41,20 +41,22 @@ run_script([
 ```
 # Planning session 2
 ## types/architecture
-Message types:
-- All parts:
--- client -> server msgs: create fname | delete fname | read fname | append fname value | exit (possibly? might be able to gracefully handle dropped sockets)
--- server -> client msgs: humandisplay string
--- ZAB msgs: proposal (epoch, counter) | ack | commit (epoch, counter) | recover (details depend on part of project)
-- Assume-no-failures initial part:
--- peer -> peer msgs (if sessions are atomic): broadcast of list of client -> server msgs
--- peer -> peer msgs (if sessions are non-atomic): broadcast of individual (create | delete | append)
-- Follower failure tolerance:
--- add heatbeats to detect failures (p2p msgs unioned with "heartbeat" literal)
--- replace broadcast with ZAB in P2P msgs
--- give ZAB recovery a "dummy" leader election protocol that hard-codes the initial leader?
-- Leader failure tolerance:
--- Make ZAB recovery use proper leader election algorithm
+### All parts:
+- client -> server msgs: create fname | delete fname | read fname | append fname value | exit (possibly? might be able to gracefully handle dropped sockets)
+- server -> client msgs: humandisplay string
+- ZAB msgs: proposal (epoch, counter) | ack | commit (epoch, counter) | recover (details depend on part of project)
+
+### Assume-no-failures initial part:
+- peer -> peer msgs (if sessions are atomic): broadcast of list of client -> server msgs
+- peer -> peer msgs (if sessions are non-atomic): broadcast of individual (create | delete | append)
+
+### Follower failure tolerance:
+- add heatbeats to detect failures (p2p msgs unioned with "heartbeat" literal)
+- replace broadcast with ZAB in P2P msgs
+- give ZAB recovery a "dummy" leader election protocol that hard-codes the initial leader?
+
+### Leader failure tolerance:
+- Make ZAB recovery use proper leader election algorithm
 
 ## general notes
 Seperate client program that sends json blobs of the "client -> server msg" type in response to text on stdin
