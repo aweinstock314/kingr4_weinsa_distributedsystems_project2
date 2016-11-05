@@ -1,3 +1,4 @@
+# Planning session 1
 Three futures listening over:
 -	Incoming connections from peers - TCP
 -	Incoming connections from clients - TCP
@@ -38,3 +39,43 @@ run_script([
     ], [pid1_state, pid2_state]
 );
 ```
+# Planning session 2
+## types/architecture
+Message types:
+- All parts:
+-- client -> server msgs: create fname | delete fname | read fname | append fname value | exit (possibly? might be able to gracefully handle dropped sockets)
+-- server -> client msgs: humandisplay string
+-- ZAB msgs: proposal (epoch, counter) | ack | commit (epoch, counter) | recover (details depend on part of project)
+- Assume-no-failures initial part:
+-- peer -> peer msgs (if sessions are atomic): broadcast of list of client -> server msgs
+-- peer -> peer msgs (if sessions are non-atomic): broadcast of individual (create | delete | append)
+- Follower failure tolerance:
+-- add heatbeats to detect failures (p2p msgs unioned with "heartbeat" literal)
+-- replace broadcast with ZAB in P2P msgs
+-- give ZAB recovery a "dummy" leader election protocol that hard-codes the initial leader?
+- Leader failure tolerance:
+-- Make ZAB recovery use proper leader election algorithm
+
+## general notes
+Seperate client program that sends json blobs of the "client -> server msg" type in response to text on stdin
+
+Find out whether client sessions are supposed to be atomic (e.g. if A issues "create foo; delete foo", and B issues "create foo", is it valid to put B's create in the middle of A's session, and give B an "already exists" error).
+
+Generalize project1 `ApplicationMessage{Reader,Writer}` to Serde types, use for client/server msgs.
+
+Need networking code for all the parts. (Should networking code be build with heartbeats in mind to start with?)
+## specific action-items
+- create client (networking code and CLI interface)
+- create server-side networking code
+- translate some of the above types to code, as needed
+- implement filesystem struct/msg handler (polymorphic over broadcast)
+- come up with leader election trait & dummy leader election protocol
+- implement ZAB (polymorphic over leader election)
+- implement real leader election protocol (Bully algo, probably)
+
+## schedule-ish?
+- Avi should try to get most of the networking in the first week or two
+- Rachel should try to fill out the filesystem struct and associated types over the first week
+- Avi should make the leader election trait/dummy protocol after the networking code (end of 2nd week)
+- Rachel can implement ZAB over the LE trait in the 2nd/3rd week
+- Bully algo by whoever has more time at the end

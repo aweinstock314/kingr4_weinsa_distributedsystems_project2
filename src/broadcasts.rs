@@ -9,6 +9,8 @@ pub trait BroadcastAlgorithm: HandleMessage {
     fn broadcast(&mut self, &Self::UnderlyingMessage) -> Vec<(Self::Pid, Self::Message)>;
 }
 
+// pointwise sendall implementation
+
 pub struct SendAll<Pid, Msg> {
     deliver: Option<Box<FnMut(&Msg)>>,
     ownpid: Pid,
@@ -60,3 +62,5 @@ impl<Pid: Eq+Hash+Copy, Msg: Clone> BroadcastAlgorithm for SendAll<Pid, Msg> {
         }).collect()
     }
 }
+
+// TODO: ZAB bcast goes below here
