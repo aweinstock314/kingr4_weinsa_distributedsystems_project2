@@ -80,7 +80,7 @@ pub fn unfold<F, T, Fut>(initial: T, f: F) -> Unfold<F, T, Fut> {
     Unfold(f, Some(Either::Left(initial)))
 }
 
-fn channel<T: 'static+Send>() -> (mpsc::Sender<T>, impl Stream<Item=T, Error=mpsc::RecvError>, Box<Future<Item=(), Error=futures::stream::SendError<T, mpsc::RecvError>>>) {
+fn channel<T: 'static+Send>() -> (mpsc::Sender<T>, impl Stream<Item=T, Error=mpsc::RecvError>, Box<Future<Item=(), Error=futures::stream::SendError<T, mpsc::RecvError>>+Send>) {
     let (t1, r1) = mpsc::channel();
     let (t2, r2) = futures::stream::channel();
     let forwarder = unfold(t2, move |sender: futures::stream::Sender<T, mpsc::RecvError>| {
@@ -118,6 +118,16 @@ fn main() {
     let own_addr = nodes.get(&pid).expect(&format!("Couldn't find an entry for pid {} in {} ({:?})", pid, nodes_fname, nodes));
     debug!("own_addr: {:?}", own_addr);
 
+    let (transmit, receive, forward) = channel();
+
+    let cpupool = CpuPool::new(4);
+    let forwarder = cpupool.spawn(forward);
+
+    let controlthread = receive.for_each(|controlmsg| {
+        println!("got controlmsg: {:?}", controlmsg);
+        Ok(())
+    });
+
     let mut core = Core::new().expect("Failed to initialize event loop.");
     let bindaddr = SocketAddr::new(IpAddr::from_str("0.0.0.0").unwrap(), own_addr.0.port());
     let listener = TcpListener::bind(&bindaddr, &core.handle()).expect("Failed to bind listener.");
@@ -126,9 +136,17 @@ fn main() {
         debug!("Listening on {:?}", bindaddr);
         listener.incoming().for_each(move |(sock, peer)| {
             trace!("Got a connection from {:?}", peer);
+            try!(transmit.send(peer).map_err(|e| io::Error::new(io::ErrorKind::Other, e)));
             handle.spawn(tokio_core::io::write_all(sock, b"Hello\n").map(|_| ()).map_err(|_| ()));
             Ok(())
         })
     };
-    core.run(helloserver).expect("Failed to run event loop.");
+    let combinedfuture = helloserver.map_err(|e| {
+            warn!("helloserver error: {:?}", e);
+        }).join(forwarder.map_err(|e| {
+            warn!("forwarder error: {:?}", e);
+        })).join(controlthread.map_err(|e| {
+            warn!("controlthread error: {:?}", e);
+        }));
+    core.run(combinedfuture).expect("Failed to run event loop.");
 }
