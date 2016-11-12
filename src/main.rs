@@ -4,12 +4,14 @@
 pub extern crate argparse;
 pub extern crate bincode;
 pub extern crate byteorder;
+pub extern crate either;
 pub extern crate env_logger;
 #[macro_use] pub extern crate futures;
+pub extern crate futures_cpupool;
 #[macro_use] pub extern crate lazy_static;
 #[macro_use] pub extern crate log;
 #[macro_use] pub extern crate nom;
-extern crate serde;
+pub extern crate serde;
 #[macro_use] pub extern crate serde_derive;
 pub extern crate serde_json;
 pub extern crate tokio_core;
@@ -17,8 +19,10 @@ pub extern crate tokio_core;
 pub use argparse::{ArgumentParser, Store};
 pub use bincode::SizeLimit;
 pub use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+pub use either::Either;
 pub use futures::stream::Stream;
 pub use futures::{Async, Future, Poll};
+pub use futures_cpupool::CpuPool;
 pub use nom::IResult;
 pub use std::collections::{HashMap, HashSet, VecDeque};
 pub use std::error::Error;
@@ -45,6 +49,49 @@ pub mod parsers;
 
 pub use framing_helpers::*;
 pub use parsers::*;
+
+pub struct Unfold<F, T, Fut>(F, Option<Either<T, Fut>>);
+impl<F: FnMut(T) -> Fut, Fut: Future<Item=(T, Option<U>), Error=E>, T, U, E> Stream for Unfold<F, T, Fut> {
+    type Item = U;
+    type Error = E;
+    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
+        let mut f = &mut self.0;
+        let tmp = mem::replace(&mut self.1, None).expect("Unfold.1 was None");
+        let mut fut = tmp.either(
+            move |state| f(state),
+            move |fut| fut
+        );
+        match fut.poll() {
+            Ok(Async::Ready((state, res))) => {
+                self.1 = Some(Either::Left(state));
+                Ok(Async::Ready(res))
+            },
+            Ok(Async::NotReady) => {
+                self.1 = Some(Either::Right(fut));
+                Ok(Async::NotReady)
+            }
+            Err(e) => {
+                Err(e)
+            },
+        }
+    }
+}
+pub fn unfold<F, T, Fut>(initial: T, f: F) -> Unfold<F, T, Fut> {
+    Unfold(f, Some(Either::Left(initial)))
+}
+
+fn channel<T: 'static+Send>() -> (mpsc::Sender<T>, impl Stream<Item=T, Error=mpsc::RecvError>, Box<Future<Item=(), Error=futures::stream::SendError<T, mpsc::RecvError>>>) {
+    let (t1, r1) = mpsc::channel();
+    let (t2, r2) = futures::stream::channel();
+    let forwarder = unfold(t2, move |sender: futures::stream::Sender<T, mpsc::RecvError>| {
+        match r1.recv() {
+            Ok(msg) => sender.send(Ok(msg)).map(|newsender| (newsender, Some(()))).boxed(),
+            e @ Err(mpsc::RecvError) => sender.send(e).map(|newsender| (newsender, None)).boxed(),
+        }
+    });
+    let forwarder = forwarder.for_each(|()| Ok(()));
+    (t1, r2, forwarder.boxed())
+}
 
 fn main() {
     env_logger::init().expect("Failed to initialize logging framework.");
