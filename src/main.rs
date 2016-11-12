@@ -129,24 +129,49 @@ fn main() {
     });
 
     let mut core = Core::new().expect("Failed to initialize event loop.");
-    let bindaddr = SocketAddr::new(IpAddr::from_str("0.0.0.0").unwrap(), own_addr.0.port());
-    let listener = TcpListener::bind(&bindaddr, &core.handle()).expect("Failed to bind listener.");
-    let helloserver = {
+
+    let p2p_bindaddr = SocketAddr::new(IpAddr::from_str("0.0.0.0").unwrap(), own_addr.0.port());
+    let p2p_listener = TcpListener::bind(&p2p_bindaddr, &core.handle()).expect("Failed to bind listener.");
+    debug!("Listening for peer connections on {:?}", p2p_bindaddr);
+    let p2p = {
         let handle = core.handle();
-        debug!("Listening on {:?}", bindaddr);
-        listener.incoming().for_each(move |(sock, peer)| {
+        let transmit = transmit.clone();
+        p2p_listener.incoming().for_each(move |(sock, peer)| {
             trace!("Got a connection from {:?}", peer);
-            try!(transmit.send(peer).map_err(|e| io::Error::new(io::ErrorKind::Other, e)));
-            handle.spawn(tokio_core::io::write_all(sock, b"Hello\n").map(|_| ()).map_err(|_| ()));
+            try!(transmit.send(ControlMessage::P2PStart(format!("{:?}", peer))).map_err(|e| io::Error::new(io::ErrorKind::Other, e)));
+            handle.spawn(tokio_core::io::write_all(sock, b"Hello Peer\n").map(|_| ()).map_err(|_| ()));
             Ok(())
         })
     };
-    let combinedfuture = helloserver.map_err(|e| {
-            warn!("helloserver error: {:?}", e);
-        }).join(forwarder.map_err(|e| {
+
+    let client_bindaddr = SocketAddr::new(IpAddr::from_str("0.0.0.0").unwrap(), own_addr.1);
+    let client_listener = TcpListener::bind(&client_bindaddr, &core.handle()).expect("Failed to bind listener.");
+    debug!("Listening for client connections on {:?}", client_bindaddr);
+    let client = {
+        let handle = core.handle();
+        client_listener.incoming().for_each(move |(sock, peer)| {
+            trace!("Got a connection from {:?}", peer);
+            try!(transmit.send(ControlMessage::ClientStart(format!("{:?}", peer))).map_err(|e| io::Error::new(io::ErrorKind::Other, e)));
+            handle.spawn(tokio_core::io::write_all(sock, b"Hello Client\n").map(|_| ()).map_err(|_| ()));
+            Ok(())
+        })
+    };
+
+
+    let combinedfuture = p2p.map_err(|e| {
+            warn!("p2p listener error: {:?}", e);
+        }).join(client.map_err(|e| {
+            warn!("client listener error: {:?}", e);
+        })).join(forwarder.map_err(|e| {
             warn!("forwarder error: {:?}", e);
         })).join(controlthread.map_err(|e| {
             warn!("controlthread error: {:?}", e);
         }));
     core.run(combinedfuture).expect("Failed to run event loop.");
+}
+
+#[derive(Debug)]
+enum ControlMessage {
+    P2PStart(String),
+    ClientStart(String),
 }
