@@ -9,6 +9,7 @@ pub extern crate env_logger;
 #[macro_use] pub extern crate lazy_static;
 #[macro_use] pub extern crate log;
 #[macro_use] pub extern crate nom;
+extern crate serde;
 #[macro_use] pub extern crate serde_derive;
 pub extern crate serde_json;
 pub extern crate tokio_core;
@@ -40,7 +41,7 @@ pub mod algos;
 pub mod broadcasts;
 pub mod framing_helpers;
 pub mod parsers;
-pub mod tests;
+#[cfg(test)] mod tests;
 
 pub use framing_helpers::*;
 pub use parsers::*;

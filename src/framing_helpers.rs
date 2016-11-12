@@ -1,4 +1,6 @@
 use super::*;
+use serde::{Serialize, Deserialize};
+use std::marker::PhantomData;
 
 // Potential Future Work: COBS framer: https://en.wikipedia.org/wiki/Consistent_Overhead_Byte_Stuffing
 pub struct LengthPrefixedFramerState {
@@ -208,5 +210,56 @@ impl<I: FramedIo<In=In, Out=Out>, In, Out> Future for WriteFrame<I, In> where In
         };
         self.0 = newself;
         res
+    }
+}
+
+pub struct SerdeFrameReader<F: FramedIo<In=In,Out=Vec<u8>>, T: Deserialize, In>(F, PhantomData<T>);
+pub struct SerdeFrameWriter<F: FramedIo<In=Vec<u8>,Out=Out>, T: Serialize, Out>(F, PhantomData<T>);
+
+impl<F: FramedIo<In=In,Out=Vec<u8>>, T: Deserialize, In> FramedIo for SerdeFrameReader<F, T, In> {
+    type In = ();
+    type Out = T;
+    fn poll_read(&mut self) -> Async<()> {
+        self.0.poll_read()
+    }
+    fn read(&mut self) -> Poll<Self::Out, io::Error> {
+        let buf = try_ready!(self.0.read());
+        // TODO: polymorphism over deserializers
+        serde_json::from_str(&String::from_utf8_lossy(&buf))
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+            .map(|r| Async::Ready(r))
+    }
+    fn poll_write(&mut self) -> Async<()> {
+        panic!("poll_write on SerdeFrameReader");
+    }
+    fn write(&mut self, _: Self::In) -> Poll<(), io::Error> {
+        panic!("write on SerdeFrameReader");
+    }
+    fn flush(&mut self) -> Poll<(), io::Error> {
+        panic!("flush on SerdeFrameReader");
+    }
+}
+
+impl<F: FramedIo<In=Vec<u8>,Out=Out>, T: Serialize, Out> FramedIo for SerdeFrameWriter<F, T, Out> {
+    type In = T;
+    type Out = ();
+    fn poll_read(&mut self) -> Async<()> {
+        panic!("poll_read on SerdeFrameWriter");
+    }
+    fn read(&mut self) -> Poll<Self::Out, io::Error> {
+        panic!("read on SerdeFrameWriter");
+    }
+    fn poll_write(&mut self) -> Async<()> {
+        self.0.poll_write()
+    }
+    fn write(&mut self, req: Self::In) -> Poll<(), io::Error> {
+        // TODO: polymorphism over serializers
+        let buf = try!(
+            serde_json::to_string(&req)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e)));
+        self.0.write(buf.as_bytes().into())
+    }
+    fn flush(&mut self) -> Poll<(), io::Error> {
+        self.0.flush()
     }
 }
