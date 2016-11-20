@@ -21,7 +21,8 @@ pub use bincode::SizeLimit;
 pub use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 pub use either::Either;
 pub use futures::stream::Stream;
-pub use futures::{Async, Future, Poll};
+pub use futures::{Async, Future, Poll, Sink};
+pub use futures::sync::mpsc as fmpsc;
 pub use futures_cpupool::CpuPool;
 pub use nom::IResult;
 pub use serde::{Serialize, Deserialize};
@@ -82,7 +83,7 @@ pub fn unfold<F, T, Fut>(initial: T, f: F) -> Unfold<F, T, Fut> {
     Unfold(f, Some(Either::Left(initial)))
 }
 
-fn channel<T: 'static+Send>() -> (mpsc::Sender<T>, impl Stream<Item=T, Error=mpsc::RecvError>, Box<Future<Item=(), Error=futures::stream::SendError<T, mpsc::RecvError>>+Send>) {
+/*fn channel<T: 'static+Send>() -> (mpsc::Sender<T>, impl Stream<Item=T, Error=mpsc::RecvError>, Box<Future<Item=(), Error=futures::stream::SendError<T, mpsc::RecvError>>+Send>) {
     let (t1, r1) = mpsc::channel();
     let (t2, r2) = futures::stream::channel();
     let forwarder = unfold(t2, move |sender: futures::stream::Sender<T, mpsc::RecvError>| {
@@ -93,7 +94,7 @@ fn channel<T: 'static+Send>() -> (mpsc::Sender<T>, impl Stream<Item=T, Error=mps
     });
     let forwarder = forwarder.for_each(|()| Ok(()));
     (t1, r2, forwarder.boxed())
-}
+}*/
 
 fn split_sock<D: Deserialize, S: Serialize>(sock: TcpStream) ->
     impl Future<Item=(SerdeFrameReader<LengthPrefixedReader<TcpStream>, D, Vec<u8>>,
@@ -134,16 +135,17 @@ fn main() {
     let own_addr = nodes.get(&pid).expect(&format!("Couldn't find an entry for pid {} in {} ({:?})", pid, nodes_fname, nodes));
     debug!("own_addr: {:?}", own_addr);
 
-    let (transmit, receive, forward) = channel();
+    /*let (transmit, receive, forward) = channel();
 
     let cpupool = CpuPool::new(4);
-    let forwarder = cpupool.spawn(forward);
+    let forwarder = cpupool.spawn(forward);*/
+    let (transmit, receive) = fmpsc::channel(1000);
 
     let mut core = Core::new().expect("Failed to initialize event loop.");
 
     struct ControlThread {
         handle: Handle,
-        transmit: mpsc::Sender<ControlMessage>,
+        transmit: fmpsc::Sender<ControlMessage>,
         client_id: usize,
         client_readers: HashMap<usize, SerdeFrameReader<LengthPrefixedReader<TcpStream>, ClientToServerMessage, Vec<u8>>>,
         client_writers: HashMap<usize, SerdeFrameWriter<LengthPrefixedWriter<TcpStream>, ServerToClientMessage, Vec<u8>>>,
@@ -151,7 +153,7 @@ fn main() {
     }
 
     impl ControlThread {
-        fn client_send(&mut self, pid: usize, m: ServerToClientMessage) {
+        fn client_send(&mut self, pid: usize, m: ServerToClientMessage) -> Box<Future<Item=(),Error=()>+Send>{
             if let Some(w) = self.client_writers.remove(&pid) {
                 /*let fut = futures::lazy(move || futures::finished(w));
                 let fut = fut.and_then(move |w| {
@@ -161,12 +163,13 @@ fn main() {
                 let fut = write_frame(w,m);
                 let transmit = self.transmit.clone();
                 let fut = fut.and_then(move |w| {
-                    transmit.send(ControlMessage::FinishedClientWrite(pid, w)).unwrap();
-                    Ok(())
+                    transmit.send(ControlMessage::FinishedClientWrite(pid, w)).map_err(|e| io::Error::new(io::ErrorKind::Other, e))
                 });
-                self.handle.spawn(fut.map_err(|_| ()));
+                //self.handle.spawn(fut.map_err(|_| ()));
+                fut.map(|_| ()).map_err(|_| ()).boxed()
             } else {
                 self.client_wqueue.push_back(m);
+                futures::finished(()).boxed()
             }
         }
     }
@@ -193,9 +196,8 @@ fn main() {
                         //let r: SerdeFrameReader<LengthPrefixedReader<TcpStream>, ClientToServerMessage, Vec<u8>> = r;
                         //let w: SerdeFrameWriter<LengthPrefixedWriter<TcpStream>, ServerToClientMessage, Vec<u8>> = w;
                         println!("1");
-                        transmit.send(ControlMessage::NewClient(cid, (r, w))).unwrap();
-                        Ok(())
                         //Ok((r, write_frame(w, ServerToClientMessage::HumanDisplay("Hello Client!".into()))))
+                        transmit.send(ControlMessage::NewClient(cid, (r, w))).map_err(|e| io::Error::new(io::ErrorKind::Other, e))
                     });
                     ct.handle.spawn(fut.map(|_| ()).map_err(|_| ()));
                     //handle.spawn(tokio_core::io::write_all(sock, b"Hello Client\n").map(|_| ()).map_err(|_| ()));
@@ -203,12 +205,14 @@ fn main() {
                 ControlMessage::NewClient(pid, (r, w)) => {
                     ct.client_readers.insert(pid, r);
                     ct.client_writers.insert(pid, w);
-                    ct.client_send(pid, ServerToClientMessage::HumanDisplay("Hello Client!".into()));
+                    let fut = ct.client_send(pid, ServerToClientMessage::HumanDisplay("Hello Client!".into()));
+                    ct.handle.spawn(fut);
                 },
                 ControlMessage::FinishedClientWrite(pid, w) => {
                     ct.client_writers.insert(pid, w);
                     if let Some(m) = ct.client_wqueue.pop_front() {
-                        ct.client_send(pid, m);
+                        let fut = ct.client_send(pid, m);
+                        ct.handle.spawn(fut);
                     }
                 }
             }
@@ -224,7 +228,8 @@ fn main() {
         let transmit = transmit.clone();
         p2p_listener.incoming().for_each(move |(sock, peer)| {
             trace!("Got a connection from {:?}", peer);
-            try!(transmit.send(ControlMessage::P2PStart(format!("{:?}", peer))).map_err(|e| io::Error::new(io::ErrorKind::Other, e)));
+            //handle.spawn(transmit.send(ControlMessage::P2PStart(format!("{:?}", peer))).map_err(|e| io::Error::new(io::ErrorKind::Other, e)));
+            handle.spawn(transmit.clone().send(ControlMessage::P2PStart(format!("{:?}", peer))).map(|_| ()).map_err(|_| ()));
             handle.spawn(tokio_core::io::write_all(sock, b"Hello Peer\n").map(|_| ()).map_err(|_| ()));
             Ok(())
         })
@@ -237,7 +242,8 @@ fn main() {
         let handle = core.handle();
         client_listener.incoming().for_each(move |(sock, peer)| {
             trace!("Got a connection from {:?}", peer);
-            try!(transmit.send(ControlMessage::ClientStart(sock)).map_err(|e| io::Error::new(io::ErrorKind::Other, e)));
+            //handle.spawn(transmit.send(ControlMessage::ClientStart(sock)).map_err(|e| io::Error::new(io::ErrorKind::Other, e)));
+            handle.spawn(transmit.clone().send(ControlMessage::ClientStart(sock)).map(|_| ()).map_err(|_| ()));
             Ok(())
         })
     };
@@ -247,9 +253,9 @@ fn main() {
             warn!("p2p listener error: {:?}", e);
         }).join(client.map_err(|e| {
             warn!("client listener error: {:?}", e);
-        })).join(forwarder.map_err(|e| {
+        }))/*.join(forwarder.map_err(|e| {
             warn!("forwarder error: {:?}", e);
-        })).join(controlthread.map_err(|e| {
+        }))*/.join(controlthread.map_err(|e| {
             warn!("controlthread error: {:?}", e);
         }));
     core.run(combinedfuture).expect("Failed to run event loop.");
