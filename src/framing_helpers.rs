@@ -1,5 +1,5 @@
 use super::*;
-use serde::{Serialize, Deserialize};
+//use serde::{Serialize, Deserialize};
 use std::marker::PhantomData;
 
 // Potential Future Work: COBS framer: https://en.wikipedia.org/wiki/Consistent_Overhead_Byte_Stuffing
@@ -215,6 +215,18 @@ impl<I: FramedIo<In=In, Out=Out>, In, Out> Future for WriteFrame<I, In> where In
 
 pub struct SerdeFrameReader<F: FramedIo<In=In,Out=Vec<u8>>, T: Deserialize, In>(F, PhantomData<T>);
 pub struct SerdeFrameWriter<F: FramedIo<In=Vec<u8>,Out=Out>, T: Serialize, Out>(F, PhantomData<T>);
+
+impl<F: FramedIo<In=In,Out=Vec<u8>>, T: Deserialize, In> SerdeFrameReader<F, T, In> {
+    pub fn new(f: F) -> SerdeFrameReader<F, T, In> {
+        SerdeFrameReader(f, PhantomData)
+    }
+}
+
+impl<F: FramedIo<In=Vec<u8>,Out=Out>, T: Serialize, Out> SerdeFrameWriter<F, T, Out> {
+    pub fn new(f: F) -> SerdeFrameWriter<F, T, Out> {
+        SerdeFrameWriter(f, PhantomData)
+    }
+}
 
 impl<F: FramedIo<In=In,Out=Vec<u8>>, T: Deserialize, In> FramedIo for SerdeFrameReader<F, T, In> {
     type In = ();

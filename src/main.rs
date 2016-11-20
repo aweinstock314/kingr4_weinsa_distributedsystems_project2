@@ -24,6 +24,7 @@ pub use futures::stream::Stream;
 pub use futures::{Async, Future, Poll};
 pub use futures_cpupool::CpuPool;
 pub use nom::IResult;
+pub use serde::{Serialize, Deserialize};
 pub use std::collections::{HashMap, HashSet, VecDeque};
 pub use std::error::Error;
 pub use std::fs::File;
@@ -47,6 +48,7 @@ pub mod framing_helpers;
 pub mod parsers;
 #[cfg(test)] mod tests;
 
+pub use algos::*;
 pub use framing_helpers::*;
 pub use parsers::*;
 
@@ -93,6 +95,20 @@ fn channel<T: 'static+Send>() -> (mpsc::Sender<T>, impl Stream<Item=T, Error=mps
     (t1, r2, forwarder.boxed())
 }
 
+fn split_sock<D: Deserialize, S: Serialize>(sock: TcpStream) ->
+    impl Future<Item=(SerdeFrameReader<LengthPrefixedReader<TcpStream>, D, Vec<u8>>,
+                      SerdeFrameWriter<LengthPrefixedWriter<TcpStream>, S, Vec<u8>>),
+                Error=io::Error> {
+    let rw = futures::lazy(move || {
+        futures::finished(sock.split())
+    });
+    let rw = rw.map(|(r, w)| (
+        SerdeFrameReader::new(LengthPrefixedReader::new(r, SizeLimit::Bounded(0x10000))),
+        SerdeFrameWriter::new(LengthPrefixedWriter::new(w))
+    ));
+    rw
+}
+
 fn main() {
     env_logger::init().expect("Failed to initialize logging framework.");
 
@@ -123,12 +139,82 @@ fn main() {
     let cpupool = CpuPool::new(4);
     let forwarder = cpupool.spawn(forward);
 
-    let controlthread = receive.for_each(|controlmsg| {
-        println!("got controlmsg: {:?}", controlmsg);
-        Ok(())
-    });
-
     let mut core = Core::new().expect("Failed to initialize event loop.");
+
+    struct ControlThread {
+        handle: Handle,
+        transmit: mpsc::Sender<ControlMessage>,
+        client_id: usize,
+        client_readers: HashMap<usize, SerdeFrameReader<LengthPrefixedReader<TcpStream>, ClientToServerMessage, Vec<u8>>>,
+        client_writers: HashMap<usize, SerdeFrameWriter<LengthPrefixedWriter<TcpStream>, ServerToClientMessage, Vec<u8>>>,
+        client_wqueue: VecDeque<ServerToClientMessage>,
+    }
+
+    impl ControlThread {
+        fn client_send(&mut self, pid: usize, m: ServerToClientMessage) {
+            if let Some(w) = self.client_writers.remove(&pid) {
+                /*let fut = futures::lazy(move || futures::finished(w));
+                let fut = fut.and_then(move |w| {
+                    println!("Hello");
+                    write_frame(w, m)
+                });*/
+                let fut = write_frame(w,m);
+                let transmit = self.transmit.clone();
+                let fut = fut.and_then(move |w| {
+                    transmit.send(ControlMessage::FinishedClientWrite(pid, w)).unwrap();
+                    Ok(())
+                });
+                self.handle.spawn(fut.map_err(|_| ()));
+            } else {
+                self.client_wqueue.push_back(m);
+            }
+        }
+    }
+
+    let controlthread = {
+        let mut ct = ControlThread {
+            handle: core.handle(),
+            transmit: transmit.clone(),
+            client_id: 0,
+            client_readers: HashMap::new(),
+            client_writers: HashMap::new(),
+            client_wqueue: VecDeque::new(),
+        };
+        receive.for_each(move |controlmsg| {
+            println!("got controlmsg: {:?}", controlmsg);
+            match controlmsg {
+                ControlMessage::P2PStart(s) => {}
+                ControlMessage::ClientStart(sock) => {
+                    let split = split_sock(sock);
+                    let cid = ct.client_id;
+                    ct.client_id += 1;
+                    let transmit = ct.transmit.clone();
+                    let fut = split.and_then(move |(r, w)| {
+                        //let r: SerdeFrameReader<LengthPrefixedReader<TcpStream>, ClientToServerMessage, Vec<u8>> = r;
+                        //let w: SerdeFrameWriter<LengthPrefixedWriter<TcpStream>, ServerToClientMessage, Vec<u8>> = w;
+                        println!("1");
+                        transmit.send(ControlMessage::NewClient(cid, (r, w))).unwrap();
+                        Ok(())
+                        //Ok((r, write_frame(w, ServerToClientMessage::HumanDisplay("Hello Client!".into()))))
+                    });
+                    ct.handle.spawn(fut.map(|_| ()).map_err(|_| ()));
+                    //handle.spawn(tokio_core::io::write_all(sock, b"Hello Client\n").map(|_| ()).map_err(|_| ()));
+                },
+                ControlMessage::NewClient(pid, (r, w)) => {
+                    ct.client_readers.insert(pid, r);
+                    ct.client_writers.insert(pid, w);
+                    ct.client_send(pid, ServerToClientMessage::HumanDisplay("Hello Client!".into()));
+                },
+                ControlMessage::FinishedClientWrite(pid, w) => {
+                    ct.client_writers.insert(pid, w);
+                    if let Some(m) = ct.client_wqueue.pop_front() {
+                        ct.client_send(pid, m);
+                    }
+                }
+            }
+            Ok(())
+        })
+    };
 
     let p2p_bindaddr = SocketAddr::new(IpAddr::from_str("0.0.0.0").unwrap(), own_addr.0.port());
     let p2p_listener = TcpListener::bind(&p2p_bindaddr, &core.handle()).expect("Failed to bind listener.");
@@ -151,8 +237,7 @@ fn main() {
         let handle = core.handle();
         client_listener.incoming().for_each(move |(sock, peer)| {
             trace!("Got a connection from {:?}", peer);
-            try!(transmit.send(ControlMessage::ClientStart(format!("{:?}", peer))).map_err(|e| io::Error::new(io::ErrorKind::Other, e)));
-            handle.spawn(tokio_core::io::write_all(sock, b"Hello Client\n").map(|_| ()).map_err(|_| ()));
+            try!(transmit.send(ControlMessage::ClientStart(sock)).map_err(|e| io::Error::new(io::ErrorKind::Other, e)));
             Ok(())
         })
     };
@@ -170,8 +255,23 @@ fn main() {
     core.run(combinedfuture).expect("Failed to run event loop.");
 }
 
-#[derive(Debug)]
 enum ControlMessage {
     P2PStart(String),
-    ClientStart(String),
+    ClientStart(TcpStream),
+    NewClient(usize, (SerdeFrameReader<LengthPrefixedReader<TcpStream>, ClientToServerMessage, Vec<u8>>,
+                      SerdeFrameWriter<LengthPrefixedWriter<TcpStream>, ServerToClientMessage, Vec<u8>>)),
+    FinishedClientWrite(usize, SerdeFrameWriter<LengthPrefixedWriter<TcpStream>, ServerToClientMessage, Vec<u8>>),
+}
+
+unsafe impl Sync for ControlMessage {}
+
+impl fmt::Debug for ControlMessage {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            &ControlMessage::P2PStart(ref s) => fmt.debug_tuple("P2PStart").field(s).finish(),
+            &ControlMessage::ClientStart(ref t) => fmt.debug_tuple("ClientStart").field(t).finish(),
+            &ControlMessage::NewClient(ref pid, _) => fmt.debug_tuple("NewClient").field(pid).finish(),
+            &ControlMessage::FinishedClientWrite(ref pid, _) => fmt.debug_tuple("FinishedClientWrite").field(pid).finish(),
+        }
+    }
 }

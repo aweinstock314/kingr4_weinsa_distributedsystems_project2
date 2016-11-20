@@ -82,10 +82,12 @@ impl<B:BroadcastAlgorithm<UnderlyingMessage = PeerToPeerMessage>> System<B> {
 // Message enums: 
 // Used to distinguish message types between different parties 
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ServerToClientMessage {
 	HumanDisplay(String),
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ClientToServerMessage {
 	Create(String),
 	Delete(String),
