@@ -92,6 +92,21 @@ pub struct Zab<Pid, Msg> {
     deliver: Box<FnMut(&Msg)>,
 }
 
+impl<Pid, Msg> Zab<Pid, Msg> {
+    pub fn new(processes: HashSet<Pid>, deliver: Box<FnMut(&Msg)>, initial_leader: Pid, own_pid: Pid) -> Zab<Pid, Msg> {
+        Zab {
+            msg_count: 0,
+            ack_count: HashMap::new(),
+            next_msg: BTreeSet::new(),
+            msg_q: VecDeque::new(),
+            leader: initial_leader,
+            own_pid: own_pid,
+            processes: processes,
+            deliver: deliver,
+        }
+    }
+}
+
 impl<Pid:Clone+Copy+Eq+Hash, Msg:Clone> Zab<Pid, Msg> {
     fn internal_broadcast(&mut self, z: ZabTypes<Msg>) -> Vec<(Pid, ZabMessage<Pid,Msg>)> {
         let m = ZabMessage{ sender: self.own_pid, mtype: z, count: self.msg_count };

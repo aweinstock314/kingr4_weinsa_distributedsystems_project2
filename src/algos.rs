@@ -96,7 +96,7 @@ pub enum ClientToServerMessage {
 }
 
 // (create | delete | append)
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum PeerToPeerMessage {
 	Create(String),
 	Delete(String),

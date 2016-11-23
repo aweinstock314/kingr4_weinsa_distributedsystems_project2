@@ -21,7 +21,7 @@ pub use bincode::SizeLimit;
 pub use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 pub use either::Either;
 pub use futures::stream::Stream;
-pub use futures::{Async, Future, Poll, Sink};
+pub use futures::{Async, Future, IntoFuture, Poll, Sink};
 pub use futures::sync::mpsc as fmpsc;
 pub use futures_cpupool::CpuPool;
 pub use nom::IResult;
@@ -50,11 +50,12 @@ pub mod parsers;
 #[cfg(test)] mod tests;
 
 pub use algos::*;
+pub use broadcasts::*;
 pub use framing_helpers::*;
 pub use parsers::*;
 
 pub struct Unfold<F, T, Fut>(F, Option<Either<T, Fut>>);
-impl<F: FnMut(T) -> Fut, Fut: Future<Item=(T, Option<U>), Error=E>, T, U, E> Stream for Unfold<F, T, Fut> {
+impl<F: FnMut(T) -> Fut, Fut: Future<Item=Option<(T, U)>, Error=E>, T, U, E> Stream for Unfold<F, T, Fut> {
     type Item = U;
     type Error = E;
     fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
@@ -65,10 +66,13 @@ impl<F: FnMut(T) -> Fut, Fut: Future<Item=(T, Option<U>), Error=E>, T, U, E> Str
             move |fut| fut
         );
         match fut.poll() {
-            Ok(Async::Ready((state, res))) => {
+            Ok(Async::Ready(Some((state, res)))) => {
                 self.1 = Some(Either::Left(state));
-                Ok(Async::Ready(res))
+                Ok(Async::Ready(Some(res)))
             },
+            Ok(Async::Ready(None)) => {
+                Ok(Async::Ready(None))
+            }
             Ok(Async::NotReady) => {
                 self.1 = Some(Either::Right(fut));
                 Ok(Async::NotReady)
@@ -79,7 +83,7 @@ impl<F: FnMut(T) -> Fut, Fut: Future<Item=(T, Option<U>), Error=E>, T, U, E> Str
         }
     }
 }
-pub fn unfold<F, T, Fut>(initial: T, f: F) -> Unfold<F, T, Fut> {
+pub fn unfold<F: FnMut(T) -> Fut, Fut: Future<Item=Option<(T, U)>, Error=E>, T, U, E>(initial: T, f: F) -> Unfold<F, T, Fut> {
     Unfold(f, Some(Either::Left(initial)))
 }
 
@@ -230,6 +234,7 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
         client_readers: HashMap<usize, ApplicationSource<ServerToClientMessage, ClientToServerMessage>>,
         client_writers: HashMap<usize, ApplicationSink<ServerToClientMessage, ClientToServerMessage>>,
         client_wqueue: VecDeque<ServerToClientMessage>,
+        filesystem: System<Zab<usize, PeerToPeerMessage>>,
     }
 
     impl ControlThread {
@@ -250,6 +255,12 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
     }
 
     let controlthread = {
+        const HARDCODED_LEADER: Pid = 1;
+        let processes = nodes.iter().map(|(&k, _)| k).collect();
+        let deliver = Box::new(move |m: &PeerToPeerMessage| {
+            println!("got {:?} via ZAB", m);
+        });
+        let zab = Zab::new(processes, deliver, HARDCODED_LEADER, pid);
         let mut ct = ControlThread {
             handle: core.handle(),
             transmit: transmit.clone(),
@@ -257,6 +268,7 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
             client_readers: HashMap::new(),
             client_writers: HashMap::new(),
             client_wqueue: VecDeque::new(),
+            filesystem: System::new(zab),
         };
         receive.for_each(move |controlmsg| {
             println!("got controlmsg: {:?}", controlmsg);
@@ -275,7 +287,39 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
                     //handle.spawn(tokio_core::io::write_all(sock, b"Hello Client\n").map(|_| ()).map_err(|_| ()));
                 },
                 ControlMessage::NewClient(pid, (r, w)) => {
-                    ct.client_readers.insert(pid, r);
+                    //ct.client_readers.insert(pid, r);
+                    let transmit = ct.transmit.clone();
+                    /*let tstream = futures::stream::unfold(transmit, |t| Some(Ok((t.clone(), t))));
+                    let readerstream = r.zip(tstream).and_then(move |(m, t)| {
+                        t.send(ControlMessage::C2S(m)).then(move |x| {
+                            if let Err(e) = x {
+                                println!("Error sending a C2S: {:?}", e);
+                                return Err(str_to_ioerror("foo"));
+                            }
+                            Ok(())
+                        })
+                    }).map_err(|_| ()).for_each(|_| Ok(()));*/
+                    let readerstream = r.into_future().and_then(move |r| {
+                        unfold((transmit, r), |(t, (r_cur, r_next))| {
+                            if let Some(m) = r_cur {
+                                let f = t.send(ControlMessage::C2S(m)).then(move |x| {
+                                    match x {
+                                        Err(e) => {
+                                            println!("Error sending a C2S: {:?}", e);
+                                            Ok(None).into_future().boxed()
+                                        },
+                                        Ok(t) => {
+                                            r_next.into_future().and_then(|(a,b)| Ok(Some( ((t, (a,b)), ()) ))).into_future().boxed()
+                                        }
+                                    }
+                                }).boxed();
+                                f
+                            } else {
+                                Ok(None).into_future().boxed()
+                            }
+                        }).for_each(|_| Ok(()))
+                    }).map(|_| ());
+                    ct.handle.spawn(readerstream.map_err(|_| ()));
                     ct.client_writers.insert(pid, w);
                     let fut = ct.client_send(pid, ServerToClientMessage::HumanDisplay("Hello Client!".into()));
                     ct.handle.spawn(fut);
@@ -286,6 +330,10 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
                         let fut = ct.client_send(pid, m);
                         ct.handle.spawn(fut);
                     }
+                }
+                ControlMessage::C2S(m) => {
+                    // TODO: connect to peers, send things
+                    let (peermsgs, response) = ct.filesystem.handle_client_message(m);
                 }
             }
             Ok(())
@@ -339,9 +387,8 @@ enum ControlMessage {
     NewClient(usize, (ApplicationSource<ServerToClientMessage, ClientToServerMessage>,
                       ApplicationSink<ServerToClientMessage, ClientToServerMessage>)),
     FinishedClientWrite(usize, ApplicationSink<ServerToClientMessage, ClientToServerMessage>),
+    C2S(ClientToServerMessage),
 }
-
-unsafe impl Sync for ControlMessage {}
 
 impl fmt::Debug for ControlMessage {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
@@ -350,6 +397,7 @@ impl fmt::Debug for ControlMessage {
             &ControlMessage::ClientStart(ref t) => fmt.debug_tuple("ClientStart").field(t).finish(),
             &ControlMessage::NewClient(ref pid, _) => fmt.debug_tuple("NewClient").field(pid).finish(),
             &ControlMessage::FinishedClientWrite(ref pid, _) => fmt.debug_tuple("FinishedClientWrite").field(pid).finish(),
+            &ControlMessage::C2S(ref m) => fmt.debug_tuple("C2S").field(m).finish(),
         }
     }
 }

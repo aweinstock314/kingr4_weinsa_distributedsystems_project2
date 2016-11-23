@@ -4,7 +4,7 @@ use std::marker::PhantomData;
 use std::cmp::Ordering;
 use tokio_core::io::{Codec, EasyBuf};
 
-fn str_to_ioerror(s: &'static str) -> io::Error {
+pub fn str_to_ioerror(s: &'static str) -> io::Error {
     let e: Box<Error+Send+Sync> = s.into();
     io::Error::new(io::ErrorKind::Other, e)
 }
