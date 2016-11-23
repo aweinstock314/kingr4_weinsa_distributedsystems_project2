@@ -177,23 +177,91 @@ fn client_main(args: Vec<String>, nodes_fname: String) {
     let server_addr = SocketAddr::new(server_info.0.ip(), server_info.1);
     debug!("server_addr: {:?}", server_addr);
 
-    let mut core = Core::new().expect("Failed to initialize event loop.");
+    let (transmit, receive) = fmpsc::channel::<ClientToServerMessage>(10);
 
-    let server = TcpStream::connect(&server_addr, &core.handle());
+    thread::spawn(move || {
+        let mut core = Core::new().expect("Failed to initialize event loop.");
 
-    let handle = core.handle();
-    let fut = server.and_then(move |sock| {
-        let (r, w) = split_sock(sock);
-        let r = r.map_err(|e| { println!("An error occurred: {:?}", e) });
-        handle.spawn(r.for_each(|m| {
-            match m {
-                ServerToClientMessage::HumanDisplay(s) => println!("Got message: {}", s),
-            }
-            Ok(())
-        }));
-        w.send(ClientToServerMessage::Read("Hello".into())).and_then(|_| futures::empty::<(), _>())
+        let server = TcpStream::connect(&server_addr, &core.handle());
+
+        let handle = core.handle();
+        let fut = server.and_then(move |sock| {
+            let (r, w) = split_sock(sock);
+            let r = r.map_err(|e| { println!("An error occurred: {:?}", e) });
+            handle.spawn(r.for_each(|m| {
+                match m {
+                    ServerToClientMessage::HumanDisplay(s) => println!("Got message: {}", s),
+                }
+                Ok(())
+            }));
+            w.send_all(receive.map_err(|()| str_to_ioerror("hello"))).and_then(|_| {
+                Ok(())
+            })
+        }).map_err(|e| {
+            warn!("Error in TCP loop: {:?}", e);
+            e
+        });
+        core.run(fut).expect("Failed to run event loop.");
     });
-    core.run(fut).expect("Failed to run event loop.");
+
+    let print_help = || {
+        println!("Options:");
+        println!("create filename");
+        println!("delete filename");
+        println!("append filename newline_terminated_data");
+        println!("read filename");
+    };
+    let stdin = io::stdin();
+    let mut stdout = io::stdout();
+    loop {
+        let mut line = "".into();
+        let _ = stdout.flush();
+        print!("client> ");
+        let _ = stdout.flush();
+        if let Err(e) = stdin.read_line(&mut line) {
+            warn!("Error reading from stdin: {:?}", e);
+            break;
+        };
+        debug!("line was {:?}", line);
+        if let Some(o1) = line.find(|c: char| c.is_whitespace()) {
+            let i1 = o1+1;
+            let cmd = &line[..i1-1];
+            trace!("cmd: {:?}", cmd);
+            if let Some(o2) = line[i1..].find(|c: char| c.is_whitespace()) {
+                let i2 = i1 + o2 + 1;
+                let filename = &line[i1..i2-1];
+                trace!("filename: {:?}", filename);
+                let msg = match cmd {
+                    "create" => ClientToServerMessage::Create(filename.into()),
+                    "delete" => ClientToServerMessage::Delete(filename.into()),
+                    "read" => ClientToServerMessage::Read(filename.into()),
+                    "append" => {
+                        if let Some(o3) = line[i2..].find('\n') {
+                            let i3 = i2 + o3 + 1;
+                            let data = &line[i2..i3-1];
+                            trace!("data: {:?}", data);
+                            ClientToServerMessage::Append(filename.into(), data.into())
+                        } else {
+                            continue
+                        }
+                    },
+                    s => {
+                        println!("Invalid command: {:?}", s);
+                        print_help();
+                        continue
+                    }
+                };
+                debug!("msg: {:?}", msg);
+                if let Err(e) = transmit.clone().send(msg).wait() {
+                    warn!("Error sending across the channel: {:?}", e);
+                    break;
+                }
+            } else {
+                print_help();
+                continue;
+            }
+        }
+    }
 }
 
 fn server_main(args: Vec<String>, nodes_fname: String) {
