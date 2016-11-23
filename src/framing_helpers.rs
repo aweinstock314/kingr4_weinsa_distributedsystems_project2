@@ -1,8 +1,89 @@
 use super::*;
 //use serde::{Serialize, Deserialize};
 use std::marker::PhantomData;
+use std::cmp::Ordering;
+use tokio_core::io::{Codec, EasyBuf};
 
-// Potential Future Work: COBS framer: https://en.wikipedia.org/wiki/Consistent_Overhead_Byte_Stuffing
+fn str_to_ioerror(s: &'static str) -> io::Error {
+    let e: Box<Error+Send+Sync> = s.into();
+    io::Error::new(io::ErrorKind::Other, e)
+}
+
+// https://en.wikipedia.org/wiki/Consistent_Overhead_Byte_Stuffing
+pub struct COBSCodec {
+    delimiter: u8,
+}
+
+impl COBSCodec {
+    pub fn new(delimiter: u8) -> COBSCodec {
+        COBSCodec { delimiter: delimiter }
+    }
+}
+
+// adapted from https://bitbucket.org/cmcqueen1975/cobs-python/src/e8d6ed7e7f4754f6a79a5fecc69ca29528a9ee39/python2/cobs/cobs/_cobs_py.py
+impl Codec for COBSCodec {
+    type In = Vec<u8>;
+    type Out = Vec<u8>;
+
+    fn encode(&mut self, in_bytes: Self::Out, out_bytes: &mut Vec<u8>) -> io::Result<()> {
+        // TODO: reserve out_bytes for efficiency?
+        let mut final_zero = true;
+        let mut idx = 0;
+        let mut search_start_idx = 0;
+        for &in_char in in_bytes.iter() {
+            if in_char == self.delimiter {
+                final_zero = true;
+                out_bytes.push(idx - search_start_idx + 1);
+                out_bytes.extend_from_slice(&in_bytes[search_start_idx as usize..idx as usize]);
+                search_start_idx = idx + 1;
+            } else {
+                if idx - search_start_idx == 0xfd {
+                    final_zero = false;
+                    out_bytes.push(0xff);
+                    out_bytes.extend_from_slice(&in_bytes[search_start_idx as usize..idx as usize+1]);
+                    search_start_idx = idx + 1;
+                }
+            }
+            idx += 1;
+        }
+        if idx != search_start_idx || final_zero {
+            out_bytes.push(idx - search_start_idx + 1);
+            out_bytes.extend_from_slice(&in_bytes[search_start_idx as usize..idx as usize]);
+        }
+        Ok(())
+    }
+
+    fn decode(&mut self, in_bytes: &mut EasyBuf) -> Result<Option<Self::In>, io::Error> {
+        let mut out_bytes = vec![]; // TODO: reserve for efficiency?
+        let mut idx = 0;
+        if in_bytes.len() > 0 {
+            loop {
+                let length = in_bytes.as_slice()[idx];
+                if length == 0 {
+                    return Err(str_to_ioerror("COBSCodec::decode: encountered zero length"));
+                }
+                idx += 1;
+                let end = idx + (length as usize) - 1;
+                let copy_bytes = &in_bytes.as_slice()[idx..end];
+                if copy_bytes.iter().any(|&c| c == self.delimiter) {
+                    return Err(str_to_ioerror("COBSCodec::decode: encountered unexpected delimiter"));
+                }
+                out_bytes.extend_from_slice(copy_bytes);
+                idx = end;
+                match idx.cmp(&in_bytes.len()) {
+                    Ordering::Greater => return Ok(None),
+                    Ordering::Less => if length < 0xff {
+                        out_bytes.push(self.delimiter);
+                    },
+                    Ordering::Equal => break,
+                }
+            }
+        }
+        Ok(Some(out_bytes))
+    }
+}
+
+
 pub struct LengthPrefixedFramerState {
     sofar: usize,
     buf: Vec<u8>,
