@@ -16,7 +16,7 @@ pub extern crate serde;
 pub extern crate serde_json;
 pub extern crate tokio_core;
 
-pub use argparse::{ArgumentParser, Store};
+pub use argparse::{ArgumentParser, Collect, Store};
 pub use bincode::SizeLimit;
 pub use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 pub use either::Either;
@@ -125,16 +125,61 @@ fn split_sock<S: Serialize, D: Deserialize>(sock: TcpStream) ->
 
 fn main() {
     env_logger::init().expect("Failed to initialize logging framework.");
-
-    let mut pid: Pid = 0;
+    let args: Vec<String> = std::env::args().collect();
+    trace!("Main args: {:?}", args);
+    let mut subcommand: String = "".into();
     let mut nodes_fname: String = "nodes.txt".into();
+    let mut subargs = vec![];
     {
         let nodes_descr = format!("File to load the node hosts/ports from (default {})", nodes_fname);
         let mut ap = ArgumentParser::new();
+        ap.stop_on_first_argument(true);
         ap.set_description("Filesystem backed by Zookeeper's Atomic Broadcast by Rachel King and Avi Weinstock for Distributed Systems class");
-        ap.refer(&mut pid).add_argument("pid", Store, "This node's process id").required();
+        ap.refer(&mut subcommand).add_argument("subcommand", Store, "{client,server}").required();
         ap.refer(&mut nodes_fname).add_option(&["-n", "--nodes-file"], Store, &nodes_descr);
-        ap.parse_args_or_exit();
+        ap.refer(&mut subargs).add_argument("args", Collect, "Arguments for subcommand");
+        if let Err(code) = ap.parse(args.clone(), &mut io::stdout(), &mut io::stderr()) {
+            std::process::exit(code);
+        }
+    }
+    let mut newargs = vec![subcommand.clone()];
+    newargs.extend(subargs);
+    match &*subcommand {
+        "client" => client_main(newargs, nodes_fname),
+        "server" => server_main(newargs, nodes_fname),
+        s => {
+            println!("subcommand must be either 'client' or 'server' ({:?} is invalid)", s);
+        }
+    }
+}
+
+fn client_main(args: Vec<String>, nodes_fname: String) {
+    trace!("Client args: {:?}", args);
+    let mut pid: Pid = 0;
+    {
+        let mut ap = ArgumentParser::new();
+        ap.set_description("Subcommand for connecting to servers");
+        ap.refer(&mut pid).add_argument("pid", Store, "Process ID of the server to connect to").required();
+        if let Err(code) = ap.parse(args, &mut io::stdout(), &mut io::stderr()) {
+            std::process::exit(code);
+        }
+    }
+
+    // (pid -> ip) mapping
+    let nodes = run_parser_on_file(&nodes_fname, parse_nodes).expect(&format!("Couldn't parse {}", nodes_fname));
+    debug!("nodes: {:?}", nodes);
+}
+
+fn server_main(args: Vec<String>, nodes_fname: String) {
+    trace!("Server args: {:?}", args);
+    let mut pid: Pid = 0;
+    {
+        let mut ap = ArgumentParser::new();
+        ap.set_description("Subcommand for serving a virtual filesystem and synchronizing with peers");
+        ap.refer(&mut pid).add_argument("pid", Store, "This node's process ID").required();
+        if let Err(code) = ap.parse(args, &mut io::stdout(), &mut io::stderr()) {
+            std::process::exit(code);
+        }
     }
     debug!("{}, {}", pid, nodes_fname);
 
@@ -227,7 +272,7 @@ fn main() {
 
     let p2p_bindaddr = SocketAddr::new(IpAddr::from_str("0.0.0.0").unwrap(), own_addr.0.port());
     let p2p_listener = TcpListener::bind(&p2p_bindaddr, &core.handle()).expect("Failed to bind listener.");
-    debug!("Listening for peer connections on {:?}", p2p_bindaddr);
+    info!("Listening for peer connections on {:?}", p2p_bindaddr);
     let p2p = {
         let handle = core.handle();
         let transmit = transmit.clone();
@@ -242,7 +287,7 @@ fn main() {
 
     let client_bindaddr = SocketAddr::new(IpAddr::from_str("0.0.0.0").unwrap(), own_addr.1);
     let client_listener = TcpListener::bind(&client_bindaddr, &core.handle()).expect("Failed to bind listener.");
-    debug!("Listening for client connections on {:?}", client_bindaddr);
+    info!("Listening for client connections on {:?}", client_bindaddr);
     let client = {
         let handle = core.handle();
         client_listener.incoming().for_each(move |(sock, peer)| {
