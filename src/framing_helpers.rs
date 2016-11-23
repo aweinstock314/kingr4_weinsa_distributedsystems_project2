@@ -56,21 +56,26 @@ impl Codec for COBSCodec {
     fn decode(&mut self, in_bytes: &mut EasyBuf) -> Result<Option<Self::In>, io::Error> {
         let mut out_bytes = vec![]; // TODO: reserve for efficiency?
         let mut idx = 0;
+        trace!("COBSCodec::decode({:?})", in_bytes.as_slice());
         if in_bytes.len() > 0 {
             loop {
                 let length = in_bytes.as_slice()[idx];
+                trace!("COBS: length {}", length);
                 if length == 0 {
                     return Err(str_to_ioerror("COBSCodec::decode: encountered zero length"));
                 }
                 idx += 1;
                 let end = idx + (length as usize) - 1;
+                trace!("COBS: idx {} end {}", idx, end);
                 let copy_bytes = &in_bytes.as_slice()[idx..end];
                 if copy_bytes.iter().any(|&c| c == self.delimiter) {
                     return Err(str_to_ioerror("COBSCodec::decode: encountered unexpected delimiter"));
                 }
                 out_bytes.extend_from_slice(copy_bytes);
                 idx = end;
-                match idx.cmp(&in_bytes.len()) {
+                let comparison = idx.cmp(&in_bytes.len());
+                trace!("COBS: comparison {:?}", comparison);
+                match comparison {
                     Ordering::Greater => return Ok(None),
                     Ordering::Less => if length < 0xff {
                         out_bytes.push(self.delimiter);
@@ -78,8 +83,11 @@ impl Codec for COBSCodec {
                     Ordering::Equal => break,
                 }
             }
+            in_bytes.drain_to(out_bytes.len()+1);
+            Ok(Some(out_bytes))
+        } else {
+            Ok(None)
         }
-        Ok(Some(out_bytes))
     }
 }
 
@@ -100,14 +108,19 @@ impl<S: Serialize, D: Deserialize> Codec for SerdeJSONCodec<S, D> {
     fn decode(&mut self, buf: &mut EasyBuf) -> Result<Option<Self::In>, io::Error> {
         use serde_json::error::Error::*;
         use serde_json::error::ErrorCode::*;
-        match serde_json::from_str(&String::from_utf8_lossy(buf.as_slice())) {
+        let res = match serde_json::from_str(&String::from_utf8_lossy(buf.as_slice())) {
             Ok(val) => Ok(Some(val)),
             Err(Syntax(ref code, _, _)) if match *code {
                 EOFWhileParsingList | EOFWhileParsingObject | EOFWhileParsingString | EOFWhileParsingValue => true,
                 _ => false
             } => Ok(None),
             Err(e) => Err(io::Error::new(io::ErrorKind::Other, e)),
-        }
+        };
+        // serde_json::from_trait's implementation guarentees that the entire buffer is read, although it's not clear whether this is promised
+        // https://docs.rs/serde_json/0.8.3/src/serde_json/.cargo/registry/src/github.com-1ecc6299db9ec823/serde_json-0.8.3/src/de.rs.html#967
+        let length = buf.len();
+        buf.drain_to(length);
+        res
     }
 }
 

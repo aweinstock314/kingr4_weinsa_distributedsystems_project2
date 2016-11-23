@@ -130,7 +130,7 @@ fn split_sock<S: Serialize, D: Deserialize>(sock: TcpStream) ->
 fn main() {
     env_logger::init().expect("Failed to initialize logging framework.");
     let args: Vec<String> = std::env::args().collect();
-    trace!("Main args: {:?}", args);
+    debug!("Main args: {:?}", args);
     let mut subcommand: String = "".into();
     let mut nodes_fname: String = "nodes.txt".into();
     let mut subargs = vec![];
@@ -158,7 +158,7 @@ fn main() {
 }
 
 fn client_main(args: Vec<String>, nodes_fname: String) {
-    trace!("Client args: {:?}", args);
+    debug!("Client args: {:?}", args);
     let mut pid: Pid = 0;
     {
         let mut ap = ArgumentParser::new();
@@ -197,7 +197,7 @@ fn client_main(args: Vec<String>, nodes_fname: String) {
 }
 
 fn server_main(args: Vec<String>, nodes_fname: String) {
-    trace!("Server args: {:?}", args);
+    debug!("Server args: {:?}", args);
     let mut pid: Pid = 0;
     {
         let mut ap = ArgumentParser::new();
@@ -361,7 +361,7 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
     let client = {
         let handle = core.handle();
         client_listener.incoming().for_each(move |(sock, peer)| {
-            trace!("Got a connection from {:?}", peer);
+            debug!("Got a connection from {:?}", peer);
             //handle.spawn(transmit.send(ControlMessage::ClientStart(sock)).map_err(|e| io::Error::new(io::ErrorKind::Other, e)));
             handle.spawn(transmit.clone().send(ControlMessage::ClientStart(sock)).map(|_| ()).map_err(|_| ()));
             Ok(())
