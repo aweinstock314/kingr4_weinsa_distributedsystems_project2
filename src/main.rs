@@ -336,7 +336,7 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
             client_readers: HashMap::new(),
             client_writers: HashMap::new(),
             client_wqueue: VecDeque::new(),
-            filesystem: System::new(zab),
+            filesystem: System::new(zab, pid),
         };
         receive.for_each(move |controlmsg| {
             println!("got controlmsg: {:?}", controlmsg);
@@ -368,9 +368,9 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
                         })
                     }).map_err(|_| ()).for_each(|_| Ok(()));*/
                     let readerstream = r.into_future().and_then(move |r| {
-                        unfold((transmit, r), |(t, (r_cur, r_next))| {
+                        unfold((transmit, r), move |(t, (r_cur, r_next))| {
                             if let Some(m) = r_cur {
-                                let f = t.send(ControlMessage::C2S(m)).then(move |x| {
+                                let f = t.send(ControlMessage::C2S(pid, m)).then(move |x| {
                                     match x {
                                         Err(e) => {
                                             println!("Error sending a C2S: {:?}", e);
@@ -401,9 +401,15 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
                         ct.handle.spawn(fut);
                     }
                 }
-                ControlMessage::C2S(m) => {
-                    // TODO: connect to peers, send things
-                    let (peermsgs, response) = ct.filesystem.handle_client_message(m);
+                ControlMessage::C2S(pid, msg) => {
+                    // TODO: connect to peers, send peermsgs
+                    let (peermsgs, response) = ct.filesystem.handle_client_message(msg);
+                    let mut fut = futures::finished(()).boxed();
+                    for m in response {
+                        let step = ct.client_send(pid, m);
+                        fut = fut.and_then(|_| step).boxed();
+                    }
+                    ct.handle.spawn(fut);
                 }
             }
             Ok(())
@@ -457,7 +463,7 @@ enum ControlMessage {
     NewClient(usize, (ApplicationSource<ServerToClientMessage, ClientToServerMessage>,
                       ApplicationSink<ServerToClientMessage, ClientToServerMessage>)),
     FinishedClientWrite(usize, ApplicationSink<ServerToClientMessage, ClientToServerMessage>),
-    C2S(ClientToServerMessage),
+    C2S(usize, ClientToServerMessage),
 }
 
 impl fmt::Debug for ControlMessage {
@@ -467,7 +473,7 @@ impl fmt::Debug for ControlMessage {
             &ControlMessage::ClientStart(ref t) => fmt.debug_tuple("ClientStart").field(t).finish(),
             &ControlMessage::NewClient(ref pid, _) => fmt.debug_tuple("NewClient").field(pid).finish(),
             &ControlMessage::FinishedClientWrite(ref pid, _) => fmt.debug_tuple("FinishedClientWrite").field(pid).finish(),
-            &ControlMessage::C2S(ref m) => fmt.debug_tuple("C2S").field(m).finish(),
+            &ControlMessage::C2S(ref pid, ref m) => fmt.debug_tuple("C2S").field(pid).field(m).finish(),
         }
     }
 }
