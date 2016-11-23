@@ -321,7 +321,9 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
                     }).map(|_| ());
                     ct.handle.spawn(readerstream.map_err(|_| ()));
                     ct.client_writers.insert(pid, w);
-                    let fut = ct.client_send(pid, ServerToClientMessage::HumanDisplay("Hello Client!".into()));
+                    let mut s: String = "Hello Client!".into();
+                    for _ in 0..512 { s.push('A'); }
+                    let fut = ct.client_send(pid, ServerToClientMessage::HumanDisplay(s));
                     ct.handle.spawn(fut);
                 },
                 ControlMessage::FinishedClientWrite(pid, w) => {

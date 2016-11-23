@@ -33,22 +33,24 @@ impl Codec for COBSCodec {
         for &in_char in in_bytes.iter() {
             if in_char == self.delimiter {
                 final_zero = true;
-                out_bytes.push(idx - search_start_idx + 1);
-                out_bytes.extend_from_slice(&in_bytes[search_start_idx as usize..idx as usize]);
+                out_bytes.push((idx - search_start_idx + 1) as u8);
+                out_bytes.extend_from_slice(&in_bytes[search_start_idx..idx]);
                 search_start_idx = idx + 1;
             } else {
                 if idx - search_start_idx == 0xfd {
                     final_zero = false;
                     out_bytes.push(0xff);
-                    out_bytes.extend_from_slice(&in_bytes[search_start_idx as usize..idx as usize+1]);
+                    out_bytes.extend_from_slice(&in_bytes[search_start_idx..idx+1]);
                     search_start_idx = idx + 1;
                 }
             }
             idx += 1;
+            //trace!("COBS encode: idx {} search_start_idx {}", idx, search_start_idx);
+            debug_assert!(idx - search_start_idx <= 0xff);
         }
         if idx != search_start_idx || final_zero {
-            out_bytes.push(idx - search_start_idx + 1);
-            out_bytes.extend_from_slice(&in_bytes[search_start_idx as usize..idx as usize]);
+            out_bytes.push((idx - search_start_idx + 1) as u8);
+            out_bytes.extend_from_slice(&in_bytes[search_start_idx..idx]);
         }
         Ok(())
     }
@@ -83,7 +85,8 @@ impl Codec for COBSCodec {
                     Ordering::Equal => break,
                 }
             }
-            in_bytes.drain_to(out_bytes.len()+1);
+            trace!("COBS: idx {} out_bytes.len()+1 {}", idx, out_bytes.len()+1);
+            in_bytes.drain_to(idx);
             Ok(Some(out_bytes))
         } else {
             Ok(None)
