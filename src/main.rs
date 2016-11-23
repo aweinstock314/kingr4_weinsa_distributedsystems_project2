@@ -36,7 +36,7 @@ pub use std::str::FromStr;
 pub use std::sync::{mpsc, Mutex, MutexGuard};
 pub use std::{fmt, io, mem, net, str, thread};
 pub use std::iter::Iterator;
-pub use tokio_core::io::{Framed, FramedIo, Io, ReadHalf, WriteHalf};
+pub use tokio_core::io::{Framed, Io, ReadHalf, WriteHalf};
 pub use tokio_core::net::{TcpListener, TcpStream};
 pub use tokio_core::reactor::{Core, Handle};
 
@@ -96,7 +96,7 @@ pub fn unfold<F, T, Fut>(initial: T, f: F) -> Unfold<F, T, Fut> {
     (t1, r2, forwarder.boxed())
 }*/
 
-type ApplicationSource<T> = SerdeFrameReader<LengthPrefixedReader<TcpStream>, T, Vec<u8>>;
+/*type ApplicationSource<T> = SerdeFrameReader<LengthPrefixedReader<TcpStream>, T, Vec<u8>>;
 type ApplicationSink<T> = SerdeFrameWriter<LengthPrefixedWriter<TcpStream>, T, Vec<u8>>;
 
 fn split_sock<D: Deserialize, S: Serialize>(sock: TcpStream) ->
@@ -111,13 +111,17 @@ fn split_sock<D: Deserialize, S: Serialize>(sock: TcpStream) ->
         SerdeFrameWriter::new(LengthPrefixedWriter::new(w))
     ));
     rw
-}
-/*fn split_sock<T: Serialize+Deserialize>(sock: TcpStream) ->
-    (futures::stream::SplitSink<Framed<TcpStream, PostcomposeCodec<SerdeJSONCodec<T>, COBSCodec>>>,
-     futures::stream::SplitStream<Framed<TcpStream, PostcomposeCodec<SerdeJSONCodec<T>, COBSCodec>>>) {
-    let codec = postcompose_codec(SerdeJSONCodec::new(), COBSCodec::new(b'\n'));
-    sock.framed(codec).split()
 }*/
+type ApplicationSource<T, U> = futures::stream::SplitStream<Framed<TcpStream, PostcomposeCodec<SerdeJSONCodec<T, U>, COBSCodec>>>;
+type ApplicationSink<T, U> = futures::stream::SplitSink<Framed<TcpStream, PostcomposeCodec<SerdeJSONCodec<T, U>, COBSCodec>>>;
+
+fn split_sock<S: Serialize, D: Deserialize>(sock: TcpStream) ->
+    (futures::stream::SplitStream<Framed<TcpStream, PostcomposeCodec<SerdeJSONCodec<S, D>, COBSCodec>>>,
+    futures::stream::SplitSink<Framed<TcpStream, PostcomposeCodec<SerdeJSONCodec<S, D>, COBSCodec>>>) {
+    let codec = postcompose_codec(SerdeJSONCodec::new(), COBSCodec::new(b'\n'));
+    let (w, r) = sock.framed(codec).split();
+    (r, w)
+}
 
 fn main() {
     env_logger::init().expect("Failed to initialize logging framework.");
@@ -156,20 +160,15 @@ fn main() {
         handle: Handle,
         transmit: fmpsc::Sender<ControlMessage>,
         client_id: usize,
-        client_readers: HashMap<usize, ApplicationSource<ClientToServerMessage>>,
-        client_writers: HashMap<usize, ApplicationSink<ServerToClientMessage>>,
+        client_readers: HashMap<usize, ApplicationSource<ServerToClientMessage, ClientToServerMessage>>,
+        client_writers: HashMap<usize, ApplicationSink<ServerToClientMessage, ClientToServerMessage>>,
         client_wqueue: VecDeque<ServerToClientMessage>,
     }
 
     impl ControlThread {
         fn client_send(&mut self, pid: usize, m: ServerToClientMessage) -> Box<Future<Item=(),Error=()>+Send>{
             if let Some(w) = self.client_writers.remove(&pid) {
-                /*let fut = futures::lazy(move || futures::finished(w));
-                let fut = fut.and_then(move |w| {
-                    println!("Hello");
-                    write_frame(w, m)
-                });*/
-                let fut = write_frame(w,m);
+                let fut = w.send(m);
                 let transmit = self.transmit.clone();
                 let fut = fut.and_then(move |w| {
                     transmit.send(ControlMessage::FinishedClientWrite(pid, w)).map_err(|e| io::Error::new(io::ErrorKind::Other, e))
@@ -201,8 +200,7 @@ fn main() {
                     let cid = ct.client_id;
                     ct.client_id += 1;
                     let transmit = ct.transmit.clone();
-                    let fut = split.and_then(move |(r, w)| {
-                        println!("1");
+                    let fut = futures::finished(split).and_then(move |(r, w)| {
                         //Ok((r, write_frame(w, ServerToClientMessage::HumanDisplay("Hello Client!".into()))))
                         transmit.send(ControlMessage::NewClient(cid, (r, w))).map_err(|e| io::Error::new(io::ErrorKind::Other, e))
                     });
@@ -271,9 +269,9 @@ fn main() {
 enum ControlMessage {
     P2PStart(String),
     ClientStart(TcpStream),
-    NewClient(usize, (ApplicationSource<ClientToServerMessage>,
-                      ApplicationSink<ServerToClientMessage>)),
-    FinishedClientWrite(usize, ApplicationSink<ServerToClientMessage>),
+    NewClient(usize, (ApplicationSource<ServerToClientMessage, ClientToServerMessage>,
+                      ApplicationSink<ServerToClientMessage, ClientToServerMessage>)),
+    FinishedClientWrite(usize, ApplicationSink<ServerToClientMessage, ClientToServerMessage>),
 }
 
 unsafe impl Sync for ControlMessage {}

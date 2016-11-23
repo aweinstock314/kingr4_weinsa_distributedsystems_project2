@@ -83,16 +83,16 @@ impl Codec for COBSCodec {
     }
 }
 
-pub struct SerdeJSONCodec<T>(PhantomData<T>);
-impl<T> SerdeJSONCodec<T> {
-    pub fn new() -> SerdeJSONCodec<T> {
+pub struct SerdeJSONCodec<S, D>(PhantomData<(S, D)>);
+impl<S, D> SerdeJSONCodec<S, D> {
+    pub fn new() -> SerdeJSONCodec<S, D> {
         SerdeJSONCodec(PhantomData)
     }
 }
 
-impl<T: Serialize+Deserialize> Codec for SerdeJSONCodec<T> {
-    type In = Vec<u8>;
-    type Out = T;
+impl<S: Serialize, D: Deserialize> Codec for SerdeJSONCodec<S, D> {
+    type In = D;
+    type Out = S;
     fn encode(&mut self, msg: Self::Out, buf: &mut Vec<u8>) -> io::Result<()> {
         buf.extend(serde_json::to_string(&msg).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?.into_bytes());
         Ok(())
@@ -137,8 +137,7 @@ impl<A, B, F, G> Codec for PostcomposeCodec<F, G> where
     }
 }
 
-
-pub struct LengthPrefixedFramerState {
+/*pub struct LengthPrefixedFramerState {
     sofar: usize,
     buf: Vec<u8>,
 }
@@ -409,4 +408,4 @@ impl<F: FramedIo<In=Vec<u8>,Out=Out>, T: Serialize, Out> FramedIo for SerdeFrame
     fn flush(&mut self) -> Poll<(), io::Error> {
         self.0.flush()
     }
-}
+}*/
