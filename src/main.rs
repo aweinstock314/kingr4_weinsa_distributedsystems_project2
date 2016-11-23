@@ -36,7 +36,7 @@ pub use std::str::FromStr;
 pub use std::sync::{mpsc, Mutex, MutexGuard};
 pub use std::{fmt, io, mem, net, str, thread};
 pub use std::iter::Iterator;
-pub use tokio_core::io::{FramedIo, Io, ReadHalf, WriteHalf};
+pub use tokio_core::io::{Framed, FramedIo, Io, ReadHalf, WriteHalf};
 pub use tokio_core::net::{TcpListener, TcpStream};
 pub use tokio_core::reactor::{Core, Handle};
 
@@ -96,6 +96,9 @@ pub fn unfold<F, T, Fut>(initial: T, f: F) -> Unfold<F, T, Fut> {
     (t1, r2, forwarder.boxed())
 }*/
 
+type ApplicationSource<T> = SerdeFrameReader<LengthPrefixedReader<TcpStream>, T, Vec<u8>>;
+type ApplicationSink<T> = SerdeFrameWriter<LengthPrefixedWriter<TcpStream>, T, Vec<u8>>;
+
 fn split_sock<D: Deserialize, S: Serialize>(sock: TcpStream) ->
     impl Future<Item=(SerdeFrameReader<LengthPrefixedReader<TcpStream>, D, Vec<u8>>,
                       SerdeFrameWriter<LengthPrefixedWriter<TcpStream>, S, Vec<u8>>),
@@ -109,6 +112,12 @@ fn split_sock<D: Deserialize, S: Serialize>(sock: TcpStream) ->
     ));
     rw
 }
+/*fn split_sock<T: Serialize+Deserialize>(sock: TcpStream) ->
+    (futures::stream::SplitSink<Framed<TcpStream, PostcomposeCodec<SerdeJSONCodec<T>, COBSCodec>>>,
+     futures::stream::SplitStream<Framed<TcpStream, PostcomposeCodec<SerdeJSONCodec<T>, COBSCodec>>>) {
+    let codec = postcompose_codec(SerdeJSONCodec::new(), COBSCodec::new(b'\n'));
+    sock.framed(codec).split()
+}*/
 
 fn main() {
     env_logger::init().expect("Failed to initialize logging framework.");
@@ -147,8 +156,8 @@ fn main() {
         handle: Handle,
         transmit: fmpsc::Sender<ControlMessage>,
         client_id: usize,
-        client_readers: HashMap<usize, SerdeFrameReader<LengthPrefixedReader<TcpStream>, ClientToServerMessage, Vec<u8>>>,
-        client_writers: HashMap<usize, SerdeFrameWriter<LengthPrefixedWriter<TcpStream>, ServerToClientMessage, Vec<u8>>>,
+        client_readers: HashMap<usize, ApplicationSource<ClientToServerMessage>>,
+        client_writers: HashMap<usize, ApplicationSink<ServerToClientMessage>>,
         client_wqueue: VecDeque<ServerToClientMessage>,
     }
 
@@ -193,8 +202,6 @@ fn main() {
                     ct.client_id += 1;
                     let transmit = ct.transmit.clone();
                     let fut = split.and_then(move |(r, w)| {
-                        //let r: SerdeFrameReader<LengthPrefixedReader<TcpStream>, ClientToServerMessage, Vec<u8>> = r;
-                        //let w: SerdeFrameWriter<LengthPrefixedWriter<TcpStream>, ServerToClientMessage, Vec<u8>> = w;
                         println!("1");
                         //Ok((r, write_frame(w, ServerToClientMessage::HumanDisplay("Hello Client!".into()))))
                         transmit.send(ControlMessage::NewClient(cid, (r, w))).map_err(|e| io::Error::new(io::ErrorKind::Other, e))
@@ -264,9 +271,9 @@ fn main() {
 enum ControlMessage {
     P2PStart(String),
     ClientStart(TcpStream),
-    NewClient(usize, (SerdeFrameReader<LengthPrefixedReader<TcpStream>, ClientToServerMessage, Vec<u8>>,
-                      SerdeFrameWriter<LengthPrefixedWriter<TcpStream>, ServerToClientMessage, Vec<u8>>)),
-    FinishedClientWrite(usize, SerdeFrameWriter<LengthPrefixedWriter<TcpStream>, ServerToClientMessage, Vec<u8>>),
+    NewClient(usize, (ApplicationSource<ClientToServerMessage>,
+                      ApplicationSink<ServerToClientMessage>)),
+    FinishedClientWrite(usize, ApplicationSink<ServerToClientMessage>),
 }
 
 unsafe impl Sync for ControlMessage {}
