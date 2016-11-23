@@ -83,6 +83,60 @@ impl Codec for COBSCodec {
     }
 }
 
+pub struct SerdeJSONCodec<T>(PhantomData<T>);
+impl<T> SerdeJSONCodec<T> {
+    pub fn new() -> SerdeJSONCodec<T> {
+        SerdeJSONCodec(PhantomData)
+    }
+}
+
+impl<T: Serialize+Deserialize> Codec for SerdeJSONCodec<T> {
+    type In = Vec<u8>;
+    type Out = T;
+    fn encode(&mut self, msg: Self::Out, buf: &mut Vec<u8>) -> io::Result<()> {
+        buf.extend(serde_json::to_string(&msg).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?.into_bytes());
+        Ok(())
+    }
+    fn decode(&mut self, buf: &mut EasyBuf) -> Result<Option<Self::In>, io::Error> {
+        use serde_json::error::Error::*;
+        use serde_json::error::ErrorCode::*;
+        match serde_json::from_str(&String::from_utf8_lossy(buf.as_slice())) {
+            Ok(val) => Ok(Some(val)),
+            Err(Syntax(ref code, _, _)) if match *code {
+                EOFWhileParsingList | EOFWhileParsingObject | EOFWhileParsingString | EOFWhileParsingValue => true,
+                _ => false
+            } => Ok(None),
+            Err(e) => Err(io::Error::new(io::ErrorKind::Other, e)),
+        }
+    }
+}
+
+pub struct PostcomposeCodec<F, G>(F, G);
+pub fn postcompose_codec<F, G>(f: F, g: G) -> PostcomposeCodec<F, G> {
+    PostcomposeCodec(f, g)
+}
+impl<A, B, F, G> Codec for PostcomposeCodec<F, G> where
+    F: Codec<In=A, Out=B>,
+    G: Codec<In=Vec<u8>, Out=Vec<u8>> {
+    type In = A;
+    type Out = B;
+    fn encode(&mut self, msg: Self::Out, buf: &mut Vec<u8>) -> io::Result<()> {
+        let mut tmp = vec![];
+        self.0.encode(msg, &mut tmp)?;
+        self.1.encode(tmp, buf)
+    }
+    fn decode(&mut self, buf: &mut EasyBuf) -> Result<Option<Self::In>, io::Error> {
+        match self.1.decode(buf)? {
+            Some(x) => {
+                let mut tmp = EasyBuf::new();
+                tmp.get_mut().extend(x.into_iter());
+                self.0.decode(&mut tmp)
+            },
+            None => Ok(None),
+        }
+    }
+}
+
 
 pub struct LengthPrefixedFramerState {
     sofar: usize,
