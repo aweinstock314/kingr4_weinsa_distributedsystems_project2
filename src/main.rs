@@ -168,6 +168,28 @@ fn client_main(args: Vec<String>, nodes_fname: String) {
     // (pid -> ip) mapping
     let nodes = run_parser_on_file(&nodes_fname, parse_nodes).expect(&format!("Couldn't parse {}", nodes_fname));
     debug!("nodes: {:?}", nodes);
+
+    let server_info = nodes.get(&pid).expect(&format!("Couldn't find an entry for pid {} in {} ({:?})", pid, nodes_fname, nodes));
+    let server_addr = SocketAddr::new(server_info.0.ip(), server_info.1);
+    debug!("server_addr: {:?}", server_addr);
+
+    let mut core = Core::new().expect("Failed to initialize event loop.");
+
+    let server = TcpStream::connect(&server_addr, &core.handle());
+
+    let handle = core.handle();
+    let fut = server.and_then(move |sock| {
+        let (r, w) = split_sock(sock);
+        let r = r.map_err(|e| { println!("An error occurred: {:?}", e) });
+        handle.spawn(r.for_each(|m| {
+            match m {
+                ServerToClientMessage::HumanDisplay(s) => println!("Got message: {}", s),
+            }
+            Ok(())
+        }));
+        w.send(ClientToServerMessage::Read("Hello".into())).and_then(|_| futures::empty::<(), _>())
+    });
+    core.run(fut).expect("Failed to run event loop.");
 }
 
 fn server_main(args: Vec<String>, nodes_fname: String) {
