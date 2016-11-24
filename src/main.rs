@@ -21,8 +21,8 @@ pub use bincode::SizeLimit;
 pub use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 pub use either::Either;
 pub use futures::stream::Stream;
-pub use futures::{Async, Future, IntoFuture, Poll, Sink};
 pub use futures::sync::mpsc as fmpsc;
+pub use futures::{Async, Future, IntoFuture, Poll, Sink};
 pub use futures_cpupool::CpuPool;
 pub use nom::IResult;
 pub use serde::{Serialize, Deserialize};
@@ -31,14 +31,15 @@ pub use std::error::Error;
 pub use std::fs::File;
 pub use std::io::BufReader;
 pub use std::io::prelude::*;
+pub use std::iter::Iterator;
 pub use std::net::{IpAddr, SocketAddr};
 pub use std::str::FromStr;
 pub use std::sync::{mpsc, Mutex, MutexGuard};
+pub use std::time::Duration;
 pub use std::{fmt, io, mem, net, str, thread};
-pub use std::iter::Iterator;
 pub use tokio_core::io::{Framed, Io, ReadHalf, WriteHalf};
 pub use tokio_core::net::{TcpListener, TcpStream};
-pub use tokio_core::reactor::{Core, Handle};
+pub use tokio_core::reactor::{Core, Handle, Timeout};
 
 pub type Pid = usize;
 pub type Nodes = HashMap<Pid, (SocketAddr, u16)>;
@@ -126,6 +127,20 @@ fn split_sock<S: Serialize, D: Deserialize>(sock: TcpStream) ->
     let (w, r) = sock.framed(codec).split();
     (r, w)
 }
+
+/*fn make_ticker<F: FnMut() -> Fut, Fut: IntoFuture<Item=(), Error=io::Error>>(h: &Handle, dur: Duration, f: F) -> Box<Future<Item=(), Error=io::Error>> where
+    <Fut as IntoFuture>::Future: Send {
+    /*Timeout::new(dur, h).into_future().and_then(|t| { t.and_then(|t| {
+        f().into_future().and_then(|()| make_ticker(h, dur, f))
+    })});*/
+    unfold(Timeout::new(dur, h), |t| {
+        t.into_future().and_then(|t| { t.and_then(move |t| {
+            f().into_future().and_then(|()| {
+                Ok(Some((Timeout::new(dur, h), ())))
+            })
+        })})
+    }).for_each(|()| Ok(())).boxed()
+}*/
 
 fn main() {
     env_logger::init().expect("Failed to initialize logging framework.");
@@ -295,18 +310,41 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
 
     let mut core = Core::new().expect("Failed to initialize event loop.");
 
+    let ticker = {
+        let transmit = transmit.clone();
+        //let f = move || { transmit.send(ControlMessage::Tick).map(|_| ()).map_err(|e| io::Error::new(io::ErrorKind::Other, e)) };
+        let dur = Duration::from_millis(500);
+        let h = core.handle();
+        //make_ticker(&core.handle(), dur, f)
+        unfold((Timeout::new(dur, &h.clone()), h, transmit), move |(t, h, transmit)| {
+            t.into_future().and_then(move |t| { t.and_then(move |_| {
+                /*f().into_future().and_then(move |()| {
+                    Ok(Some(((Timeout::new(dur, &h.clone()), h, f), ())))
+                })*/
+                transmit.clone().send(ControlMessage::Tick).map(|_| ()).map_err(|e| io::Error::new(io::ErrorKind::Other, e)).and_then(move |()| {
+                    Ok(Some(((Timeout::new(dur, &h.clone()), h, transmit), ())))
+                })
+            })})
+        }).for_each(|()| Ok(()))
+
+    };
+    core.handle().spawn(ticker.map_err(|e| {
+        warn!("Error in ticker: {:?}", e);
+    }));
+
     struct ControlThread {
         handle: Handle,
         transmit: fmpsc::Sender<ControlMessage>,
         client_id: usize,
-        client_readers: HashMap<usize, ApplicationSource<ServerToClientMessage, ClientToServerMessage>>,
+        peer_pids: HashSet<usize>,
+        peer_heartbeats_and_writers: HashMap<usize, (usize, fmpsc::Sender<PeerToPeerMessage>)>,
         client_writers: HashMap<usize, ApplicationSink<ServerToClientMessage, ClientToServerMessage>>,
         client_wqueue: VecDeque<ServerToClientMessage>,
         filesystem: System<Zab<usize, PeerToPeerMessage>>,
     }
 
     impl ControlThread {
-        fn client_send(&mut self, pid: usize, m: ServerToClientMessage) -> Box<Future<Item=(),Error=()>+Send>{
+        fn client_send(&mut self, pid: usize, m: ServerToClientMessage) -> Box<Future<Item=(),Error=()>+Send> {
             if let Some(w) = self.client_writers.remove(&pid) {
                 let fut = w.send(m);
                 let transmit = self.transmit.clone();
@@ -324,16 +362,17 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
 
     let controlthread = {
         const HARDCODED_LEADER: Pid = 1;
-        let processes = nodes.iter().map(|(&k, _)| k).collect();
+        let processes: HashSet<Pid> = nodes.iter().map(|(&k, _)| k).collect();
         let deliver = Box::new(move |m: &PeerToPeerMessage| {
             println!("got {:?} via ZAB", m);
         });
-        let zab = Zab::new(processes, deliver, HARDCODED_LEADER, pid);
+        let zab = Zab::new(processes.clone(), deliver, HARDCODED_LEADER, pid);
         let mut ct = ControlThread {
             handle: core.handle(),
             transmit: transmit.clone(),
             client_id: 0,
-            client_readers: HashMap::new(),
+            peer_pids: processes,
+            peer_heartbeats_and_writers: HashMap::new(),
             client_writers: HashMap::new(),
             client_wqueue: VecDeque::new(),
             filesystem: System::new(zab, pid),
@@ -411,6 +450,13 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
                     }
                     ct.handle.spawn(fut);
                 }
+                ControlMessage::Tick => {
+                    let num_connected = ct.peer_heartbeats_and_writers.len();
+                    if num_connected < ct.peer_pids.len() {
+                        trace!("num_connected: {}; total: {}", num_connected, ct.peer_pids.len());
+                        // TODO establish connections
+                    }
+                }
             }
             Ok(())
         })
@@ -464,6 +510,7 @@ enum ControlMessage {
                       ApplicationSink<ServerToClientMessage, ClientToServerMessage>)),
     FinishedClientWrite(usize, ApplicationSink<ServerToClientMessage, ClientToServerMessage>),
     C2S(usize, ClientToServerMessage),
+    Tick,
 }
 
 impl fmt::Debug for ControlMessage {
@@ -474,6 +521,7 @@ impl fmt::Debug for ControlMessage {
             &ControlMessage::NewClient(ref pid, _) => fmt.debug_tuple("NewClient").field(pid).finish(),
             &ControlMessage::FinishedClientWrite(ref pid, _) => fmt.debug_tuple("FinishedClientWrite").field(pid).finish(),
             &ControlMessage::C2S(ref pid, ref m) => fmt.debug_tuple("C2S").field(pid).field(m).finish(),
+            &ControlMessage::Tick => fmt.debug_tuple("Tick").finish(),
         }
     }
 }
