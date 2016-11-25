@@ -18,7 +18,7 @@ pub extern crate tokio_core;
 
 pub use argparse::{ArgumentParser, Collect, Store};
 pub use bincode::SizeLimit;
-pub use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+pub use byteorder::{ByteOrder, LittleEndian, ReadBytesExt, WriteBytesExt};
 pub use either::Either;
 pub use futures::stream::Stream;
 pub use futures::sync::mpsc as fmpsc;
@@ -299,7 +299,7 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
     let nodes_rev: HashMap<SocketAddr, Pid> = nodes.iter().map(|(&k, &v)| (v.0, k)).collect();
     debug!("nodes_rev: {:?}", nodes_rev);
 
-    let own_addr = nodes.get(&pid).expect(&format!("Couldn't find an entry for pid {} in {} ({:?})", pid, nodes_fname, nodes));
+    let own_addr = *nodes.get(&pid).expect(&format!("Couldn't find an entry for pid {} in {} ({:?})", pid, nodes_fname, nodes));
     debug!("own_addr: {:?}", own_addr);
 
     /*let (transmit, receive, forward) = channel();
@@ -341,6 +341,8 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
         client_writers: HashMap<usize, ApplicationSink<ServerToClientMessage, ClientToServerMessage>>,
         client_wqueue: VecDeque<ServerToClientMessage>,
         filesystem: System<Zab<usize, PeerToPeerMessage>>,
+        nodes: Nodes,
+        ownpid: usize,
     }
 
     impl ControlThread {
@@ -372,15 +374,29 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
             transmit: transmit.clone(),
             client_id: 0,
             peer_pids: processes,
+            nodes: nodes,
             peer_heartbeats_and_writers: HashMap::new(),
             client_writers: HashMap::new(),
             client_wqueue: VecDeque::new(),
             filesystem: System::new(zab, pid),
+            ownpid: pid,
         };
         receive.for_each(move |controlmsg| {
             println!("got controlmsg: {:?}", controlmsg);
             match controlmsg {
-                ControlMessage::P2PStart(s) => {}
+                ControlMessage::P2PStart(sock) => {
+                    let transmit = ct.transmit.clone();
+                    let buf = vec![0; 8];
+                    let fut = tokio_core::io::read_exact(sock, buf);
+                    let fut = fut.and_then(move |(sock, buf)| {
+                        let theirpid = LittleEndian::read_u64(&buf[0..8]) as usize;
+                        println!("theirpid: {}", theirpid);
+                        transmit.send(ControlMessage::NewPeer(theirpid, split_sock(sock))).map(|_| ()).map_err(|_| unreachable!())
+                    });
+                    ct.handle.spawn(fut.map_err(|e| {
+                        warn!("Error in P2PStart: {:?}", e);
+                    }));
+                },
                 ControlMessage::ClientStart(sock) => {
                     let split = split_sock(sock);
                     let cid = ct.client_id;
@@ -433,15 +449,45 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
                     let fut = ct.client_send(pid, ServerToClientMessage::HumanDisplay(s));
                     ct.handle.spawn(fut);
                 },
+                ControlMessage::NewPeer(pid, (r, w)) => {
+                    let (tx, rx) = fmpsc::channel(10);
+                    if let Some((heartbeat, old_t)) = ct.peer_heartbeats_and_writers.insert(pid, (0, tx)) {
+                        println!("already had an entry for peer {} with heartbeat {}", pid, heartbeat);
+                        // TODO: how should this be handled without leaking the old socket/channel?
+                    }
+                    ct.handle.spawn(w.send_all(rx.map_err(|()| str_to_ioerror("NewPeer (rx -> w)"))).map(|_| ()).map_err(|_| ()));
+                    // TODO: generalize readerstream's construction into a new combinator (mapM-with-threaded-loopstate?)
+                    let transmit = ct.transmit.clone();
+                    let readerstream = r.into_future().and_then(move |r| {
+                        unfold((transmit, r), move |(t, (r_cur, r_next))| {
+                            if let Some(m) = r_cur {
+                                let f = t.send(ControlMessage::P2P(pid, m)).then(move |x| {
+                                    match x {
+                                        Err(e) => {
+                                            println!("Error sending a C2S: {:?}", e);
+                                            Ok(None).into_future().boxed()
+                                        },
+                                        Ok(t) => {
+                                            r_next.into_future().and_then(|(a,b)| Ok(Some( ((t, (a,b)), ()) ))).into_future().boxed()
+                                        }
+                                    }
+                                }).boxed();
+                                f
+                            } else {
+                                Ok(None).into_future().boxed()
+                            }
+                        }).for_each(|_| Ok(()))
+                    }).map(|_| ());
+                    ct.handle.spawn(readerstream.map_err(|_| ()));
+                },
                 ControlMessage::FinishedClientWrite(pid, w) => {
                     ct.client_writers.insert(pid, w);
                     if let Some(m) = ct.client_wqueue.pop_front() {
                         let fut = ct.client_send(pid, m);
                         ct.handle.spawn(fut);
                     }
-                }
+                },
                 ControlMessage::C2S(pid, msg) => {
-                    // TODO: connect to peers, send peermsgs
                     let (peermsgs, response) = ct.filesystem.handle_client_message(msg);
                     let mut fut = futures::finished(()).boxed();
                     for m in response {
@@ -449,14 +495,34 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
                         fut = fut.and_then(|_| step).boxed();
                     }
                     ct.handle.spawn(fut);
-                }
+                    // TODO: send peermsgs
+                },
+                ControlMessage::P2P(pid, msg) => {
+                    // TODO: pass these to System::handle_emssage
+                },
                 ControlMessage::Tick => {
                     let num_connected = ct.peer_heartbeats_and_writers.len();
                     if num_connected < ct.peer_pids.len() {
                         trace!("num_connected: {}; total: {}", num_connected, ct.peer_pids.len());
-                        // TODO establish connections
+                        for &pid in ct.peer_pids.difference(&ct.peer_heartbeats_and_writers.iter().map(|(&k, _)| k).collect()) {
+                            trace!("trying to connect to {:?}", pid);
+                            let transmit = ct.transmit.clone();
+                            let ownpid = ct.ownpid;
+                            let fut = TcpStream::connect(&ct.nodes[&pid].0, &ct.handle);
+                            let fut = fut.and_then(move |sock| {
+                                let mut buf = vec![0; 8];
+                                LittleEndian::write_u64(&mut buf[0..8], ownpid as u64);
+                                tokio_core::io::write_all(sock, buf).map(|(s, _)| s)
+                            });
+                            let fut = fut.and_then(move |sock| {
+                                transmit.send(ControlMessage::P2PStart(sock)).map_err(|_| unreachable!())
+                            });
+                            ct.handle.spawn(fut.map(|_| ()).map_err(move |e| {
+                                warn!("Error connecting to peer {:?}: {:?}", pid, e);
+                            }));
+                        }
                     }
-                }
+                },
             }
             Ok(())
         })
@@ -471,8 +537,8 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
         p2p_listener.incoming().for_each(move |(sock, peer)| {
             trace!("Got a connection from {:?}", peer);
             //handle.spawn(transmit.send(ControlMessage::P2PStart(format!("{:?}", peer))).map_err(|e| io::Error::new(io::ErrorKind::Other, e)));
-            handle.spawn(transmit.clone().send(ControlMessage::P2PStart(format!("{:?}", peer))).map(|_| ()).map_err(|_| ()));
-            handle.spawn(tokio_core::io::write_all(sock, b"Hello Peer\n").map(|_| ()).map_err(|_| ()));
+            //handle.spawn(tokio_core::io::write_all(sock, b"Hello Peer\n").map(|_| ()).map_err(|_| ()));
+            handle.spawn(transmit.clone().send(ControlMessage::P2PStart(sock)).map(|_| ()).map_err(|_| ()));
             Ok(())
         })
     };
@@ -504,12 +570,15 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
 }
 
 enum ControlMessage {
-    P2PStart(String),
+    P2PStart(TcpStream),
     ClientStart(TcpStream),
     NewClient(usize, (ApplicationSource<ServerToClientMessage, ClientToServerMessage>,
                       ApplicationSink<ServerToClientMessage, ClientToServerMessage>)),
+    NewPeer(usize, (ApplicationSource<PeerToPeerMessage, PeerToPeerMessage>,
+                    ApplicationSink<PeerToPeerMessage, PeerToPeerMessage>)),
     FinishedClientWrite(usize, ApplicationSink<ServerToClientMessage, ClientToServerMessage>),
     C2S(usize, ClientToServerMessage),
+    P2P(usize, PeerToPeerMessage),
     Tick,
 }
 
@@ -519,8 +588,10 @@ impl fmt::Debug for ControlMessage {
             &ControlMessage::P2PStart(ref s) => fmt.debug_tuple("P2PStart").field(s).finish(),
             &ControlMessage::ClientStart(ref t) => fmt.debug_tuple("ClientStart").field(t).finish(),
             &ControlMessage::NewClient(ref pid, _) => fmt.debug_tuple("NewClient").field(pid).finish(),
+            &ControlMessage::NewPeer(ref pid, _) => fmt.debug_tuple("NewPeer").field(pid).finish(),
             &ControlMessage::FinishedClientWrite(ref pid, _) => fmt.debug_tuple("FinishedClientWrite").field(pid).finish(),
             &ControlMessage::C2S(ref pid, ref m) => fmt.debug_tuple("C2S").field(pid).field(m).finish(),
+            &ControlMessage::P2P(ref pid, ref m) => fmt.debug_tuple("P2P").field(pid).field(m).finish(),
             &ControlMessage::Tick => fmt.debug_tuple("Tick").finish(),
         }
     }
