@@ -338,6 +338,7 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
         client_id: usize,
         peer_pids: HashSet<usize>,
         peer_heartbeats_and_writers: HashMap<usize, (usize, fmpsc::Sender<PeerToPeerMessage>)>,
+        //peer_wqueue: VecDeque<PeerToPeerMessage>,
         client_writers: HashMap<usize, ApplicationSink<ServerToClientMessage, ClientToServerMessage>>,
         client_wqueue: VecDeque<ServerToClientMessage>,
         filesystem: System<Zab<usize, PeerToPeerMessage>>,
@@ -388,9 +389,14 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
                     let transmit = ct.transmit.clone();
                     let buf = vec![0; 8];
                     let fut = tokio_core::io::read_exact(sock, buf);
-                    let fut = fut.and_then(move |(sock, buf)| {
+                    let ownpid = ct.ownpid;
+                    let fut = fut.and_then(move |(sock, mut buf)| {
                         let theirpid = LittleEndian::read_u64(&buf[0..8]) as usize;
-                        println!("theirpid: {}", theirpid);
+                        trace!("got a peer connection from pid {}", theirpid);
+                        LittleEndian::write_u64(&mut buf[0..8], ownpid as u64);
+                        tokio_core::io::write_all(sock, buf).map(move |(sock, _)| (sock, theirpid)).boxed()
+                    });
+                    let fut = fut.and_then(|(sock, theirpid)| {
                         transmit.send(ControlMessage::NewPeer(theirpid, split_sock(sock))).map(|_| ()).map_err(|_| unreachable!())
                     });
                     ct.handle.spawn(fut.map_err(|e| {
@@ -451,10 +457,11 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
                 },
                 ControlMessage::NewPeer(pid, (r, w)) => {
                     let (tx, rx) = fmpsc::channel(10);
-                    if let Some((heartbeat, old_t)) = ct.peer_heartbeats_and_writers.insert(pid, (0, tx)) {
-                        println!("already had an entry for peer {} with heartbeat {}", pid, heartbeat);
+                    /*if let Some((heartbeat, old_tx)) = ct.peer_heartbeats_and_writers.insert(pid, (0, tx)) {
+                        trace!("already had an entry for peer {} with heartbeat {}", pid, heartbeat);
                         // TODO: how should this be handled without leaking the old socket/channel?
-                    }
+                    }*/
+                    ct.peer_heartbeats_and_writers.entry(pid).or_insert((0, tx));
                     ct.handle.spawn(w.send_all(rx.map_err(|()| str_to_ioerror("NewPeer (rx -> w)"))).map(|_| ()).map_err(|_| ()));
                     // TODO: generalize readerstream's construction into a new combinator (mapM-with-threaded-loopstate?)
                     let transmit = ct.transmit.clone();
@@ -499,28 +506,52 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
                 },
                 ControlMessage::P2P(pid, msg) => {
                     // TODO: pass these to System::handle_emssage
+                    if let PeerToPeerMessage::HeartbeatPing = msg {
+                        let &mut (ref mut heartbeat, _) = ct.peer_heartbeats_and_writers.get_mut(&pid)
+                            .expect("Recieved a heartbeat from someone we're not connected to (somehow)");
+                        trace!("heard from {}, resetting their heartbeat from {} to 0", pid, *heartbeat);
+                        *heartbeat = 0;
+                    }
                 },
                 ControlMessage::Tick => {
-                    let num_connected = ct.peer_heartbeats_and_writers.len();
-                    if num_connected < ct.peer_pids.len() {
-                        trace!("num_connected: {}; total: {}", num_connected, ct.peer_pids.len());
-                        for &pid in ct.peer_pids.difference(&ct.peer_heartbeats_and_writers.iter().map(|(&k, _)| k).collect()) {
-                            trace!("trying to connect to {:?}", pid);
-                            let transmit = ct.transmit.clone();
-                            let ownpid = ct.ownpid;
-                            let fut = TcpStream::connect(&ct.nodes[&pid].0, &ct.handle);
-                            let fut = fut.and_then(move |sock| {
-                                let mut buf = vec![0; 8];
-                                LittleEndian::write_u64(&mut buf[0..8], ownpid as u64);
-                                tokio_core::io::write_all(sock, buf).map(|(s, _)| s)
-                            });
-                            let fut = fut.and_then(move |sock| {
-                                transmit.send(ControlMessage::P2PStart(sock)).map_err(|_| unreachable!())
-                            });
-                            ct.handle.spawn(fut.map(|_| ()).map_err(move |e| {
-                                warn!("Error connecting to peer {:?}: {:?}", pid, e);
-                            }));
+                    let connected_pids: HashSet<Pid> = ct.peer_heartbeats_and_writers.iter().map(|(&k, _)| k).collect();
+                    trace!("num_connected: {}; total: {}", connected_pids.len(), ct.peer_pids.len());
+                    trace!("connected_pids: {:?}; peer_pids: {:?}", connected_pids, ct.peer_pids);
+                    let to_connect = &ct.peer_pids - &connected_pids;
+                    trace!("to_connect: {:?}", to_connect);
+                    for &pid in to_connect.iter() {
+                        trace!("trying to connect to {:?}", pid);
+                        let transmit = ct.transmit.clone();
+                        let ownpid = ct.ownpid;
+                        let fut = TcpStream::connect(&ct.nodes[&pid].0, &ct.handle);
+                        let fut = fut.and_then(move |sock| {
+                            let mut buf = vec![0; 8];
+                            LittleEndian::write_u64(&mut buf[0..8], ownpid as u64);
+                            trace!("writing pid {} towards {}", ownpid, pid);
+                            tokio_core::io::write_all(sock, buf).map(|(s, _)| s)
+                        });
+                        let fut = fut.and_then(move |sock| {
+                            transmit.send(ControlMessage::P2PStart(sock)).map_err(|_| unreachable!())
+                        });
+                        ct.handle.spawn(fut.map(|_| ()).map_err(move |e| {
+                            warn!("Error connecting to peer {:?}: {:?}", pid, e);
+                        }));
+                    }
+                    let mut to_remove = HashSet::new();
+                    for (&pid, &mut (ref mut heartbeat, ref mut sender)) in ct.peer_heartbeats_and_writers.iter_mut() {
+                        trace!("incrementing heartbeat for {} (old value: {})", pid, *heartbeat);
+                        *heartbeat += 1;
+                        if *heartbeat % 3 == 0 {
+                            trace!("pinging {} (heartbeat {})", pid, *heartbeat);
+                            ct.handle.spawn(sender.clone().send(PeerToPeerMessage::HeartbeatPing).map(|_| ()).map_err(|_| unreachable!()));
                         }
+                        if *heartbeat % 10 == 0 {
+                            trace!("haven't heard from {} in 10 ticks, considering them dead", pid);
+                            to_remove.insert(pid);
+                        }
+                    }
+                    for pid in to_remove.iter() {
+                        ct.peer_heartbeats_and_writers.remove(&pid);
                     }
                 },
             }

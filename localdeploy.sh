@@ -15,6 +15,7 @@ export RUST_BACKTRACE=1
 
 echo "Creating a new deployment in screen session $SESSIONNAME"
 screen -S $SESSIONNAME -d -m
+sleep 0.1
 
 for pid in $PIDS; do
     echo "Spawning window for pid $pid"

@@ -104,6 +104,7 @@ pub enum PeerToPeerMessage {
     Create(String),
     Delete(String),
     Append(String, String),
+    HeartbeatPing,
 }
 
 // HandleMessage:
@@ -139,7 +140,10 @@ impl<B: BroadcastAlgorithm<UnderlyingMessage=PeerToPeerMessage>> HandleMessage f
                     } else {
                         // TODO - error handling
                     }
-
+                },
+                PeerToPeerMessage::HeartbeatPing => {
+                    // TODO: does this belong here, or only in the networking layer? (maybe have a seperate 
+                    //  enum that wraps SystemMessage, and a method to indicate dropped connections)
                 },
             }
         }
