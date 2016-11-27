@@ -392,21 +392,26 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
             ownpid: pid,
         };
         receive.for_each(move |controlmsg| {
-            println!("got controlmsg: {:?}", controlmsg);
+            match controlmsg {
+                ControlMessage::Tick | ControlMessage::P2P(_, PeerToPeerMessage::HeartbeatPing) =>
+                    trace!("Got controlmsg: {:?}", controlmsg),
+                _ => debug!("Got controlmsg: {:?}", controlmsg),
+            }
+
             match controlmsg {
                 ControlMessage::P2PStart(sock, maybe_theirpid) => {
                     let transmit = ct.transmit.clone();
                     let buf = vec![0; 8];
                     //let ownpid = ct.ownpid;
                     let fut = if let Some(theirpid) = maybe_theirpid {
-                        trace!("made a peer connection to pid {}", theirpid);
+                        info!("Made a peer connection to pid {}", theirpid);
                         let fut = Ok((sock, theirpid));
                         fut.into_future().boxed()
                     } else {
                         let fut = tokio_core::io::read_exact(sock, buf);
                         let fut = fut.and_then(move |(sock, buf)| {
                             let theirpid = LittleEndian::read_u64(&buf[0..8]) as usize;
-                            trace!("got a peer connection from pid {}", theirpid);
+                            info!("Got a peer connection from pid {}", theirpid);
                             //LittleEndian::write_u64(&mut buf[0..8], ownpid as u64);
                             //tokio_core::io::write_all(sock, buf).map(move |(sock, _)| (sock, theirpid)).boxed()
                             Ok((sock, theirpid))
@@ -566,10 +571,12 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
                         *heartbeat += 1;
                         if *heartbeat % 3 == 0 {
                             trace!("pinging {} (heartbeat {})", pid, *heartbeat);
-                            ct.handle.spawn(sender.clone().send(PeerToPeerMessage::HeartbeatPing).map(|_| ()).map_err(|_| unreachable!()));
+                            ct.handle.spawn(sender.clone().send(PeerToPeerMessage::HeartbeatPing).map(|_| ()).map_err(|e| {
+                                warn!("Error sending heartbeat: {:?}", e);
+                            }));
                         }
                         if *heartbeat % 10 == 0 {
-                            trace!("haven't heard from {} in 10 ticks, considering them dead", pid);
+                            info!("haven't heard from {} in 10 ticks, considering them dead", pid);
                             to_remove.insert(pid);
                         }
                     }
@@ -589,7 +596,7 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
         let handle = core.handle();
         let transmit = transmit.clone();
         p2p_listener.incoming().for_each(move |(sock, peer)| {
-            trace!("Got a connection from {:?}", peer);
+            info!("Got a connection from {:?}", peer);
             //handle.spawn(transmit.send(ControlMessage::P2PStart(format!("{:?}", peer))).map_err(|e| io::Error::new(io::ErrorKind::Other, e)));
             //handle.spawn(tokio_core::io::write_all(sock, b"Hello Peer\n").map(|_| ()).map_err(|_| ()));
             handle.spawn(transmit.clone().send(ControlMessage::P2PStart(sock, None)).map(|_| ()).map_err(|_| ()));
