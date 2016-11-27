@@ -8,8 +8,12 @@ use std::collections::HashMap;
 use std::fmt::Display;
 use std::fs::File;
 use std::fs::OpenOptions;
+use std::fs;
 use std::io::Write;
 use std::sync::mpsc;
+use std::io::BufReader;
+use std::io::BufRead;
+use serde::Deserialize;
 
 
 pub trait HandleMessage {
@@ -29,27 +33,46 @@ pub struct System<B:BroadcastAlgorithm<UnderlyingMessage = SystemRequestMessage>
     receiver: mpsc::Receiver<SystemRequestMessage>,
     log: Vec<SystemRequestMessage>, // Virtual log of messages sent/recieved since last save-to-disk. Maps
     disk_log: File, // File loaded on startup, written version of virtual log
+    should_write_to_log: bool,
 }
 
 // Implementation of System constructor, message handler (which updates the filesystem conditionally)
-impl<B:BroadcastAlgorithm<UnderlyingMessage = SystemRequestMessage>> System<B> where <System<B> as HandleMessage>::Pid: Display {
+impl<B:BroadcastAlgorithm<UnderlyingMessage = SystemRequestMessage>> System<B> where 
+	<System<B> as HandleMessage>::Pid: Display,
+	B::Message: Deserialize {
      pub fn new(broadcast: B, pid: <Self as HandleMessage>::Pid) -> System<B> {
         let (transmit, receive) = mpsc::channel();
         let logname = format!("log_{}.txt", pid);
-        let file = OpenOptions::new().append(true).read(true).create(true).open(logname).expect("Error in System constructor, could not open log file on disk.");
+        let file = OpenOptions::new().append(true).read(true).create(true).open(&logname).expect("Error in System constructor, could not open log file on disk.");
 
-        // TODO: recover state from the logfile
-
+        // Set up new system image.
         let mut s = System {
             broadcast: broadcast,
             files: HashMap::new(),
             receiver: receive,
             log: Vec::new(),
             disk_log: file,
+            should_write_to_log: true,
         };
         s.broadcast.set_on_deliver(Box::new(move |msg| {
             transmit.send(msg.clone()).unwrap();
         }));
+
+        // If logfile exists, read data from it, reconstruct system from it as though recovering from crash
+        // (hackey) Use own handlemessage protocol to update filesystem. Flag to not update log while we are recovering from log.
+        // Messages from peers/client will not be interleaved, as they can't reference this process' System until after new().
+        let log_data = fs::metadata(&logname).expect("Error in System constructor. Could not retrieve metadata from disk log.");//.unwrap_or_else(|e| exit_err(e, 2));
+        if log_data.len() > 0 {
+        	let log_entries = BufReader::new(&s.disk_log);
+        	s.should_write_to_log = false;
+        	for entry in log_entries.lines(){
+        		let line = entry.unwrap();
+        		let msg = serde_json::from_str(&line).expect("Error in System constructor. Encountered invalid json while recovering from log."); // json -> msg object
+        		s.broadcast.handle_message(&msg);
+        	}
+        	s.should_write_to_log = true;
+        }
+        // Return a reference to the system.
         s
     }
 
@@ -121,7 +144,9 @@ impl<B: BroadcastAlgorithm<UnderlyingMessage=SystemRequestMessage>> HandleMessag
 
             // Add message to disk log. (AT THE MOMENT - do so after every message, rather than flushing the log periodically.)
             // Possible TODO - update ofr efficiency.
-            write!(self.disk_log, "{}\n", serde_json::to_string(&msg).unwrap()).expect("Error in System::HandleMessage. Could not write to disk.");
+            if self.should_write_to_log {
+            	write!(self.disk_log, "{}\n", serde_json::to_string(&msg).unwrap()).expect("Error in System::HandleMessage. Could not write to disk."); // msg object -> json s       
+            }
 
             // Edit virtual log as specified:
             match msg {
