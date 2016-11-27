@@ -341,7 +341,7 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
         //peer_wqueue: VecDeque<PeerToPeerMessage>,
         client_writers: HashMap<usize, ApplicationSink<ServerToClientMessage, ClientToServerMessage>>,
         client_wqueue: VecDeque<ServerToClientMessage>,
-        filesystem: System<Zab<usize, PeerToPeerMessage>>,
+        filesystem: System<Zab<usize, SystemRequestMessage>>,
         nodes: Nodes,
         ownpid: usize,
     }
@@ -375,7 +375,7 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
     let controlthread = {
         const HARDCODED_LEADER: Pid = 1;
         let processes: HashSet<Pid> = nodes.iter().map(|(&k, _)| k).collect();
-        let deliver = Box::new(move |m: &PeerToPeerMessage| {
+        let deliver = Box::new(move |m: &SystemRequestMessage| {
             println!("got {:?} via ZAB", m);
         });
         let zab = Zab::new(processes.clone(), deliver, HARDCODED_LEADER, pid);
@@ -513,15 +513,27 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
                         fut = fut.and_then(|_| step).boxed();
                     }
                     ct.handle.spawn(fut);
-                    // TODO: send peermsgs
+                    for (pid, m) in peermsgs {
+                        let &(_, ref sender) = ct.peer_heartbeats_and_writers.get(&pid)
+                            .expect(&format!("Algorithm tried to send {:?} to nonexistant pid {}", m, pid));
+                            // TODO: the expect could be hit if there's a disconnection window, maybe this 
+                            //  should do retry logic if pid is in (peer_heartbeats_and_writers - processes)?
+                        ct.handle.spawn(sender.clone().send(PeerToPeerMessage::System(m)).map(|_| ()).map_err(|_| unreachable!()));
+                    }
                 },
                 ControlMessage::P2P(pid, msg) => {
-                    // TODO: pass these to System::handle_emssage
-                    if let PeerToPeerMessage::HeartbeatPing = msg {
-                        let &mut (ref mut heartbeat, _) = ct.peer_heartbeats_and_writers.get_mut(&pid)
-                            .expect("Recieved a heartbeat from someone we're not connected to (somehow)");
-                        trace!("heard from {}, resetting their heartbeat from {} to 0", pid, *heartbeat);
-                        *heartbeat = 0;
+                    match msg {
+                        PeerToPeerMessage::System(m) => {
+                            let tosend = ct.filesystem.handle_message(&m);
+                            debug!("tosend: {:?}", tosend);
+                            // TODO: actually send
+                        },
+                        PeerToPeerMessage::HeartbeatPing => {
+                            let &mut (ref mut heartbeat, _) = ct.peer_heartbeats_and_writers.get_mut(&pid)
+                                .expect("Recieved a heartbeat from someone we're not connected to (somehow)");
+                            trace!("heard from {}, resetting their heartbeat from {} to 0", pid, *heartbeat);
+                            *heartbeat = 0;
+                        },
                     }
                 },
                 ControlMessage::Tick => {
@@ -622,6 +634,12 @@ enum ControlMessage {
     C2S(usize, ClientToServerMessage),
     P2P(usize, PeerToPeerMessage),
     Tick,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+enum PeerToPeerMessage {
+    System(ZabMessage<Pid, SystemRequestMessage>),
+    HeartbeatPing,
 }
 
 impl fmt::Debug for ControlMessage {

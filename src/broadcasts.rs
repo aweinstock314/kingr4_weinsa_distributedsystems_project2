@@ -118,7 +118,7 @@ impl<Pid:Clone+Copy+Eq+Hash, Msg:Clone> Zab<Pid, Msg> {
 // Message being used in ZAB
 // Contains a senderPid, an underlying message, and a message type (ack or commit)
 // UnderlyingMessage encapsulates the message content to be delivered ***
-#[derive(Clone)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ZabMessage<Pid, Message>{
     sender: Pid,
     mtype: ZabTypes<Message>,
@@ -127,7 +127,7 @@ pub struct ZabMessage<Pid, Message>{
 
 // enum of message types for ZAB
 // processes send acknowledgment or commit 
-#[derive(Clone)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ZabTypes<Message>{
     Forwarded(Message),
     SendAll(Message),

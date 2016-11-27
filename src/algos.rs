@@ -23,16 +23,16 @@ pub trait HandleMessage {
 // Keeps track of - logical filesystem, process message logs.
 // Also carries broadcast to invoke, reciever channel use.
 // Templated over (a) broadcast implementation in broadcasts.rs.
-pub struct System<B:BroadcastAlgorithm<UnderlyingMessage = PeerToPeerMessage>> {
+pub struct System<B:BroadcastAlgorithm<UnderlyingMessage = SystemRequestMessage>> {
     broadcast: B, // broadcast algorithm, to access/send messages
     files: HashMap<String, String>, // Maps filename -> filecontent
-    receiver: mpsc::Receiver<PeerToPeerMessage>,
-    log: Vec<PeerToPeerMessage>, // Virtual log of messages sent/recieved since last save-to-disk. Maps
+    receiver: mpsc::Receiver<SystemRequestMessage>,
+    log: Vec<SystemRequestMessage>, // Virtual log of messages sent/recieved since last save-to-disk. Maps
     disk_log: File, // File loaded on startup, written version of virtual log
 }
 
 // Implementation of System constructor, message handler (which updates the filesystem conditionally)
-impl<B:BroadcastAlgorithm<UnderlyingMessage = PeerToPeerMessage>> System<B> where <System<B> as HandleMessage>::Pid: Display {
+impl<B:BroadcastAlgorithm<UnderlyingMessage = SystemRequestMessage>> System<B> where <System<B> as HandleMessage>::Pid: Display {
      pub fn new(broadcast: B, pid: <Self as HandleMessage>::Pid) -> System<B> {
         let (transmit, receive) = mpsc::channel();
         let logname = format!("log_{}.txt", pid);
@@ -62,13 +62,13 @@ impl<B:BroadcastAlgorithm<UnderlyingMessage = PeerToPeerMessage>> System<B> wher
 
         match m {
             ClientToServerMessage::Create(filename) => {
-                peer_messages.extend(self.broadcast.broadcast(&PeerToPeerMessage::Create(filename)));
+                peer_messages.extend(self.broadcast.broadcast(&SystemRequestMessage::Create(filename)));
             },
             ClientToServerMessage::Delete(filename) => {
-                peer_messages.extend(self.broadcast.broadcast(&PeerToPeerMessage::Delete(filename)));
+                peer_messages.extend(self.broadcast.broadcast(&SystemRequestMessage::Delete(filename)));
             },
             ClientToServerMessage::Append(filename, data) => {
-                peer_messages.extend(self.broadcast.broadcast(&PeerToPeerMessage::Append(filename, data)));
+                peer_messages.extend(self.broadcast.broadcast(&SystemRequestMessage::Append(filename, data)));
             },
             ClientToServerMessage::Read(filename) => {
                 if let Some(content) = self.files.get(&filename) {
@@ -100,17 +100,16 @@ pub enum ClientToServerMessage {
 
 // (create | delete | append)
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum PeerToPeerMessage {
+pub enum SystemRequestMessage {
     Create(String),
     Delete(String),
     Append(String, String),
-    HeartbeatPing,
 }
 
 // HandleMessage:
 // Message bookkeeping interface - receives message data, pulls new message data for the handler to send/
 // Returns to_send***
-impl<B: BroadcastAlgorithm<UnderlyingMessage=PeerToPeerMessage>> HandleMessage for System<B> {
+impl<B: BroadcastAlgorithm<UnderlyingMessage=SystemRequestMessage>> HandleMessage for System<B> {
     type Pid = B::Pid;
     type Message = B::Message;
     fn handle_message(&mut self, m: &Self::Message) -> Vec<(Self::Pid, Self::Message)> {
@@ -126,24 +125,20 @@ impl<B: BroadcastAlgorithm<UnderlyingMessage=PeerToPeerMessage>> HandleMessage f
 
             // Edit virtual log as specified:
             match msg {
-                PeerToPeerMessage::Create(filename) => {
+                SystemRequestMessage::Create(filename) => {
                     self.files.entry(filename).or_insert("".into());
                     // Write log to disk
                 },
-                PeerToPeerMessage::Delete(filename) => {
+                SystemRequestMessage::Delete(filename) => {
                     self.files.remove(&filename);
                     // TODO - error handling (file does not exist)
                 },
-                PeerToPeerMessage::Append(filename, data) => {
+                SystemRequestMessage::Append(filename, data) => {
                     if let Some(content) = self.files.get_mut(&filename) {
                         content.push_str(data.as_str());
                     } else {
                         // TODO - error handling
                     }
-                },
-                PeerToPeerMessage::HeartbeatPing => {
-                    // TODO: does this belong here, or only in the networking layer? (maybe have a seperate 
-                    //  enum that wraps SystemMessage, and a method to indicate dropped connections)
                 },
             }
         }
