@@ -370,6 +370,13 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
             self.peer_heartbeats_and_writers.entry(pid).or_insert((0, tx));
             self.handle.spawn(w.send_all(rx.map_err(move |()| str_to_ioerror(errmsg))).map(|_| ()).map_err(|_| ()));
         }
+        fn send_p2p(&self, pid: Pid, m: PeerToPeerMessage) {
+            let &(_, ref sender) = self.peer_heartbeats_and_writers.get(&pid)
+                .expect(&format!("Algorithm tried to send {:?} to nonexistant pid {}", m, pid));
+                // TODO: the expect could be hit if there's a disconnection window, maybe this 
+                //  should do retry logic if pid is in (peer_heartbeats_and_writers - processes)?
+            self.handle.spawn(sender.clone().send(m).map(|_| ()).map_err(|_| unreachable!()));
+        }
     }
 
     let controlthread = {
@@ -519,11 +526,7 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
                     }
                     ct.handle.spawn(fut);
                     for (pid, m) in peermsgs {
-                        let &(_, ref sender) = ct.peer_heartbeats_and_writers.get(&pid)
-                            .expect(&format!("Algorithm tried to send {:?} to nonexistant pid {}", m, pid));
-                            // TODO: the expect could be hit if there's a disconnection window, maybe this 
-                            //  should do retry logic if pid is in (peer_heartbeats_and_writers - processes)?
-                        ct.handle.spawn(sender.clone().send(PeerToPeerMessage::System(m)).map(|_| ()).map_err(|_| unreachable!()));
+                        ct.send_p2p(pid, PeerToPeerMessage::System(m));
                     }
                 },
                 ControlMessage::P2P(pid, msg) => {
@@ -531,7 +534,9 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
                         PeerToPeerMessage::System(m) => {
                             let tosend = ct.filesystem.handle_message(&m);
                             debug!("tosend: {:?}", tosend);
-                            // TODO: actually send
+                            for (pid, m) in tosend {
+                                ct.send_p2p(pid, PeerToPeerMessage::System(m));
+                            }
                         },
                         PeerToPeerMessage::HeartbeatPing => {
                             let &mut (ref mut heartbeat, _) = ct.peer_heartbeats_and_writers.get_mut(&pid)
