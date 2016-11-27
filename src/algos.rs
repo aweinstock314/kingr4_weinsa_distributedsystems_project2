@@ -55,6 +55,7 @@ impl<B:BroadcastAlgorithm<UnderlyingMessage = SystemRequestMessage>> System<B> w
             should_write_to_log: true,
         };
         s.broadcast.set_on_deliver(Box::new(move |msg| {
+            debug!("Got {:?} via ZAB", msg);
             transmit.send(msg.clone()).unwrap();
         }));
 

@@ -5,10 +5,12 @@
 //for algorithimic message handling (ZAB, etc) 
 
 use algos::HandleMessage;
-use std::collections::{HashSet, VecDeque, BTreeSet};
+use std::collections::{HashMap};
+use std::collections::{HashSet, VecDeque};
+use std::fmt;
+use std::fmt::Debug;
 use std::hash::Hash;
 use std::marker::PhantomData;
-use std::collections::{HashMap};
 
 
 // Trait = interface 
@@ -82,22 +84,36 @@ impl<Pid: Eq+Hash+Copy, Msg: Clone> BroadcastAlgorithm for SendAll<Pid, Msg> {
 // ZAB struct:
 // Stores bookkeeping data for Zookeeper Atomic Broadcast HandleMessage implementation.
 pub struct Zab<Pid, Msg> {
-    msg_count: usize, // a counter sent along with each message, for keeping track of system FIFO. (WHERE IS THIS DEFINED?)
+    msg_count: usize, // a counter sent along with each message, to ensure that messages are delivered in FIFO order
     ack_count: HashMap<usize, usize>, // a counter of acknowledgments recieved from peers <messagecount, ackcount>
-    next_msg: BTreeSet<usize>, // FIFO vector of message counters. Top of the queue = next message that should be delivered.
-    msg_q: VecDeque<( usize, Msg)>,//VecDeque<ZabMessage<Pid, Msg>>, // Queued messages, waiting to be delievered in broadcast FIFO order. Will be delivered when next_msg.pop() = msg.counter
+    next_msgs: HashMap<Pid, usize>, // (p, i) \in next_msgs => the next expected message from process p has message counter i
+    msg_q: VecDeque<(usize, Msg)>, // Queued messages, waiting to be delievered in broadcast FIFO order. Will be delivered when next_msg.pop() = msg.counter
     leader: Pid, // stored PID of leader process 
     own_pid: Pid,
     processes: HashSet<Pid>,
     deliver: Box<FnMut(&Msg)>,
 }
 
-impl<Pid, Msg> Zab<Pid, Msg> {
+impl<Pid: Debug+Eq+Hash, Msg: Debug> Debug for Zab<Pid, Msg> {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        fmt.debug_struct("Zab")
+            .field("msg_count", &self.msg_count)
+            .field("ack_count", &self.ack_count)
+            .field("next_msgs", &self.next_msgs)
+            .field("msg_q", &self.msg_q)
+            .field("leader", &self.leader)
+            .field("own_pid", &self.own_pid)
+            .field("processes", &self.processes)
+            .finish()
+    }
+}
+
+impl<Pid: Copy+Eq+Hash, Msg> Zab<Pid, Msg> {
     pub fn new(processes: HashSet<Pid>, deliver: Box<FnMut(&Msg)>, initial_leader: Pid, own_pid: Pid) -> Zab<Pid, Msg> {
         Zab {
             msg_count: 0,
             ack_count: HashMap::new(),
-            next_msg: BTreeSet::new(),
+            next_msgs: processes.iter().map(|&p| (p, 0)).collect(),
             msg_q: VecDeque::new(),
             leader: initial_leader,
             own_pid: own_pid,
@@ -158,12 +174,12 @@ pub enum ZabTypes<Message>{
     //          loop through message queue to see if messagecounter is next
     //          if next, deliver message
 
-// TODO - prettify. Match instead of "if let ="
-impl<Pid: Eq+Hash+Copy, Msg: Clone> HandleMessage for Zab<Pid, Msg> {
+impl<Pid: Eq+Hash+Copy+Debug, Msg: Clone+Debug> HandleMessage for Zab<Pid, Msg> {
     type Pid = Pid;
     type Message = ZabMessage<Pid, Msg>;
 
     fn handle_message(&mut self, m: &Self::Message) -> Vec<(Self::Pid, Self::Message)> {
+        debug!("In Zab::handle_message\ncurrent state: {:?}\nmessage: {:?}", self, m);
         let mut to_send = Vec::new();
 
         if self.own_pid == self.leader {
@@ -177,16 +193,17 @@ impl<Pid: Eq+Hash+Copy, Msg: Clone> HandleMessage for Zab<Pid, Msg> {
                 if ac > (self.processes.len()/2) + 1 { // TODO - double check majority arithmetic?     
                     // send commit to all, including self. (will follow protocol below) 
                     to_send.extend(self.internal_broadcast(ZabTypes::Commit));
-                    self.msg_count+=1;
+                    self.msg_count += 1;
                 }
-                if ac == self.processes.len() {
+                // if we've recieved Ack from everyone (except the leader) for this message, we can save memory by cleaning up the ack_count entry
+                if ac == self.processes.len() - 1 {
                     self.ack_count.remove(&m.count);
                 }
             } 
             // Broadcast SendAll message to followers if the message has been forwarded from the client.
             if let ZabTypes::Forwarded(ref underlying) = m.mtype {
+                self.msg_q.push_back((m.count, underlying.clone()));
                 to_send.extend(self.internal_broadcast(ZabTypes::SendAll(underlying.clone())));
-                self.msg_count+=1;
             }
         } else {
             // If process is not the leader, manage FIFO & commit-based delivery locally.
@@ -196,7 +213,6 @@ impl<Pid: Eq+Hash+Copy, Msg: Clone> HandleMessage for Zab<Pid, Msg> {
 
                 // send ack to leader 
                 to_send.extend(self.internal_broadcast(ZabTypes::Ack));
-                self.msg_count+=1;
             }
             // If a process sends a message to a non-leader peer, it is for leader election.
             // leader election protocol
@@ -204,40 +220,39 @@ impl<Pid: Eq+Hash+Copy, Msg: Clone> HandleMessage for Zab<Pid, Msg> {
                 // TODO
             }
         }
-        // Both leder and follower processes respond to commit
+        // Both leader and follower processes respond to commit
         if let ZabTypes::Commit = m.mtype { 
             // loop through msg_q to find the next counter.
-            // if matches the front of next, invoke deliver.
-            let mut to_subtract = BTreeSet::new(); // collects things to subtract from the next Q 
-            while let Some(next) = self.next_msg.iter().next(){
-                let mut to_remove = None;
-                for (i,&(c, ref u)) in self.msg_q.iter().enumerate() {
-                    if c == *next {
-                        to_remove = Some(i);
-                        to_subtract.insert(*next);
-                        (self.deliver)(&u);
-                    }
-                }
-                if let Some(i) = to_remove {
-                    self.msg_q.swap_remove_back(i);
+            // if it matches the expected next message for its sender, invoke deliver.
+            let mut next = self.next_msgs.get_mut(&m.sender).expect(&format!("Received a message ({:?}) from a pid ({:?}) not in next_msgs", m, m.sender));
+            let mut to_remove = None;
+            // TODO: consider replacing iteration over a VecDeque with a HashMap for performance
+            for (i,&(c, ref u)) in self.msg_q.iter().enumerate() {
+                if c == *next {
+                    to_remove = Some(i);
+                    (self.deliver)(&u);
+                    *next += 1;
+                    break;
                 }
             }
-            self.next_msg = &self.next_msg - &to_subtract;
+            if let Some(i) = to_remove {
+                self.msg_q.swap_remove_back(i);
+            }
         }
 
+        debug!("State at end of Zab::handle_message: {:?}", self);
         to_send
     }
 }
 
 
 
-impl<Pid: Eq+Hash+Copy, Msg: Clone> BroadcastAlgorithm for Zab<Pid, Msg> {
+impl<Pid: Eq+Hash+Copy+Debug, Msg: Clone+Debug> BroadcastAlgorithm for Zab<Pid, Msg> {
     type UnderlyingMessage = Msg;
     fn set_on_deliver(&mut self, f: Box<FnMut(&Self::UnderlyingMessage)>) {
         self.deliver = f;
     }
     fn broadcast(&mut self, m: &Self::UnderlyingMessage) -> Vec<(Self::Pid, Self::Message)> {
-        vec![(self.leader, ZabMessage{ sender: self.own_pid, mtype: ZabTypes::Forwarded(m.clone()), count: 0})]
-        //TODO tell leader things somehow 
+        vec![(self.leader, ZabMessage { sender: self.own_pid, mtype: ZabTypes::Forwarded(m.clone()), count: self.msg_count })]
     }
 }

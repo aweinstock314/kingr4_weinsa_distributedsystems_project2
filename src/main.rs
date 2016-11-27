@@ -382,9 +382,7 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
     let controlthread = {
         const HARDCODED_LEADER: Pid = 1;
         let processes: HashSet<Pid> = nodes.iter().map(|(&k, _)| k).collect();
-        let deliver = Box::new(move |m: &SystemRequestMessage| {
-            println!("got {:?} via ZAB", m);
-        });
+        let deliver = Box::new(|_: &SystemRequestMessage| {});
         let zab = Zab::new(processes.clone(), deliver, HARDCODED_LEADER, pid);
         let mut ct = ControlThread {
             handle: core.handle(),
