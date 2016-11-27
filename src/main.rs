@@ -361,6 +361,15 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
                 futures::finished(()).boxed()
             }
         }
+        fn insert_writer(&mut self, pid: Pid, w: ApplicationSink<PeerToPeerMessage, PeerToPeerMessage>, errmsg: &'static str) {
+            let (tx, rx) = fmpsc::channel(10);
+            /*if let Some((heartbeat, old_tx)) = ct.peer_heartbeats_and_writers.insert(pid, (0, tx)) {
+                trace!("already had an entry for peer {} with heartbeat {}", pid, heartbeat);
+                // TODO: how should this be handled without leaking the old socket/channel?
+            }*/
+            self.peer_heartbeats_and_writers.entry(pid).or_insert((0, tx));
+            self.handle.spawn(w.send_all(rx.map_err(move |()| str_to_ioerror(errmsg))).map(|_| ()).map_err(|_| ()));
+        }
     }
 
     let controlthread = {
@@ -385,17 +394,25 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
         receive.for_each(move |controlmsg| {
             println!("got controlmsg: {:?}", controlmsg);
             match controlmsg {
-                ControlMessage::P2PStart(sock) => {
+                ControlMessage::P2PStart(sock, maybe_theirpid) => {
                     let transmit = ct.transmit.clone();
                     let buf = vec![0; 8];
-                    let fut = tokio_core::io::read_exact(sock, buf);
-                    let ownpid = ct.ownpid;
-                    let fut = fut.and_then(move |(sock, mut buf)| {
-                        let theirpid = LittleEndian::read_u64(&buf[0..8]) as usize;
-                        trace!("got a peer connection from pid {}", theirpid);
-                        LittleEndian::write_u64(&mut buf[0..8], ownpid as u64);
-                        tokio_core::io::write_all(sock, buf).map(move |(sock, _)| (sock, theirpid)).boxed()
-                    });
+                    //let ownpid = ct.ownpid;
+                    let fut = if let Some(theirpid) = maybe_theirpid {
+                        trace!("made a peer connection to pid {}", theirpid);
+                        let fut = Ok((sock, theirpid));
+                        fut.into_future().boxed()
+                    } else {
+                        let fut = tokio_core::io::read_exact(sock, buf);
+                        let fut = fut.and_then(move |(sock, buf)| {
+                            let theirpid = LittleEndian::read_u64(&buf[0..8]) as usize;
+                            trace!("got a peer connection from pid {}", theirpid);
+                            //LittleEndian::write_u64(&mut buf[0..8], ownpid as u64);
+                            //tokio_core::io::write_all(sock, buf).map(move |(sock, _)| (sock, theirpid)).boxed()
+                            Ok((sock, theirpid))
+                        });
+                        fut.boxed()
+                    };
                     let fut = fut.and_then(|(sock, theirpid)| {
                         transmit.send(ControlMessage::NewPeer(theirpid, split_sock(sock))).map(|_| ()).map_err(|_| unreachable!())
                     });
@@ -456,13 +473,7 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
                     ct.handle.spawn(fut);
                 },
                 ControlMessage::NewPeer(pid, (r, w)) => {
-                    let (tx, rx) = fmpsc::channel(10);
-                    /*if let Some((heartbeat, old_tx)) = ct.peer_heartbeats_and_writers.insert(pid, (0, tx)) {
-                        trace!("already had an entry for peer {} with heartbeat {}", pid, heartbeat);
-                        // TODO: how should this be handled without leaking the old socket/channel?
-                    }*/
-                    ct.peer_heartbeats_and_writers.entry(pid).or_insert((0, tx));
-                    ct.handle.spawn(w.send_all(rx.map_err(|()| str_to_ioerror("NewPeer (rx -> w)"))).map(|_| ()).map_err(|_| ()));
+                    ct.insert_writer(pid, w, "NewPeer (rx -> w)");
                     // TODO: generalize readerstream's construction into a new combinator (mapM-with-threaded-loopstate?)
                     let transmit = ct.transmit.clone();
                     let readerstream = r.into_future().and_then(move |r| {
@@ -471,7 +482,7 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
                                 let f = t.send(ControlMessage::P2P(pid, m)).then(move |x| {
                                     match x {
                                         Err(e) => {
-                                            println!("Error sending a C2S: {:?}", e);
+                                            println!("Error sending a P2P: {:?}", e);
                                             Ok(None).into_future().boxed()
                                         },
                                         Ok(t) => {
@@ -531,7 +542,7 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
                             tokio_core::io::write_all(sock, buf).map(|(s, _)| s)
                         });
                         let fut = fut.and_then(move |sock| {
-                            transmit.send(ControlMessage::P2PStart(sock)).map_err(|_| unreachable!())
+                            transmit.send(ControlMessage::P2PStart(sock, Some(pid))).map_err(|_| unreachable!())
                         });
                         ct.handle.spawn(fut.map(|_| ()).map_err(move |e| {
                             warn!("Error connecting to peer {:?}: {:?}", pid, e);
@@ -569,7 +580,7 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
             trace!("Got a connection from {:?}", peer);
             //handle.spawn(transmit.send(ControlMessage::P2PStart(format!("{:?}", peer))).map_err(|e| io::Error::new(io::ErrorKind::Other, e)));
             //handle.spawn(tokio_core::io::write_all(sock, b"Hello Peer\n").map(|_| ()).map_err(|_| ()));
-            handle.spawn(transmit.clone().send(ControlMessage::P2PStart(sock)).map(|_| ()).map_err(|_| ()));
+            handle.spawn(transmit.clone().send(ControlMessage::P2PStart(sock, None)).map(|_| ()).map_err(|_| ()));
             Ok(())
         })
     };
@@ -601,7 +612,7 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
 }
 
 enum ControlMessage {
-    P2PStart(TcpStream),
+    P2PStart(TcpStream, Option<Pid>),
     ClientStart(TcpStream),
     NewClient(usize, (ApplicationSource<ServerToClientMessage, ClientToServerMessage>,
                       ApplicationSink<ServerToClientMessage, ClientToServerMessage>)),
@@ -616,7 +627,7 @@ enum ControlMessage {
 impl fmt::Debug for ControlMessage {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            &ControlMessage::P2PStart(ref s) => fmt.debug_tuple("P2PStart").field(s).finish(),
+            &ControlMessage::P2PStart(ref s, ref b) => fmt.debug_tuple("P2PStart").field(s).field(b).finish(),
             &ControlMessage::ClientStart(ref t) => fmt.debug_tuple("ClientStart").field(t).finish(),
             &ControlMessage::NewClient(ref pid, _) => fmt.debug_tuple("NewClient").field(pid).finish(),
             &ControlMessage::NewPeer(ref pid, _) => fmt.debug_tuple("NewPeer").field(pid).finish(),
