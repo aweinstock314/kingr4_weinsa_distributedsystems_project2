@@ -33,7 +33,6 @@ pub struct System<B:BroadcastAlgorithm<UnderlyingMessage = SystemRequestMessage>
     receiver: mpsc::Receiver<SystemRequestMessage>,
     log: Vec<SystemRequestMessage>, // Virtual log of messages sent/recieved since last save-to-disk. Maps
     disk_log: File, // File loaded on startup, written version of virtual log
-    should_write_to_log: bool,
 }
 
 // Implementation of System constructor, message handler (which updates the filesystem conditionally)
@@ -52,8 +51,8 @@ impl<B:BroadcastAlgorithm<UnderlyingMessage = SystemRequestMessage>> System<B> w
             receiver: receive,
             log: Vec::new(),
             disk_log: file,
-            should_write_to_log: true,
         };
+        let t2 = transmit.clone();
         s.broadcast.set_on_deliver(Box::new(move |msg| {
             debug!("Got {:?} via ZAB", msg);
             transmit.send(msg.clone()).unwrap();
@@ -65,14 +64,13 @@ impl<B:BroadcastAlgorithm<UnderlyingMessage = SystemRequestMessage>> System<B> w
         let log_data = fs::metadata(&logname).expect("Error in System constructor. Could not retrieve metadata from disk log.");//.unwrap_or_else(|e| exit_err(e, 2));
         if log_data.len() > 0 {
         	let log_entries = BufReader::new(&s.disk_log);
-        	s.should_write_to_log = false;
         	for entry in log_entries.lines(){
         		let line = entry.unwrap();
         		let msg = serde_json::from_str(&line).expect("Error in System constructor. Encountered invalid json while recovering from log."); // json -> msg object
-        		s.broadcast.handle_message(&msg);
+        		t2.send(msg).unwrap();
         	}
-        	s.should_write_to_log = true;
         }
+        s.drain_receiver(false);
         // Return a reference to the system.
         s
     }
@@ -130,6 +128,43 @@ pub enum SystemRequestMessage {
     Append(String, String),
 }
 
+impl<B: BroadcastAlgorithm<UnderlyingMessage=SystemRequestMessage>> System<B> {
+    fn handle_sysrequest(&mut self, msg: SystemRequestMessage) {
+        match msg {
+            SystemRequestMessage::Create(filename) => {
+                self.files.entry(filename).or_insert("".into());
+            },
+            SystemRequestMessage::Delete(filename) => {
+                self.files.remove(&filename);
+                // TODO - error handling (file does not exist)
+            },
+            SystemRequestMessage::Append(filename, data) => {
+                if let Some(content) = self.files.get_mut(&filename) {
+                    content.push_str(data.as_str());
+                } else {
+                    // TODO - error handling
+                }
+            },
+        }
+    }
+    fn drain_receiver(&mut self, should_write_to_log: bool) {
+        while let Ok(msg) = self.receiver.try_recv() {
+            if should_write_to_log {
+                // Add message to virtual log.
+                self.log.push(msg.clone());
+
+                // Add message to disk log. (AT THE MOMENT - do so after every message, rather than flushing the log periodically.)
+                // Possible TODO - update ofr efficiency.
+                write!(self.disk_log, "{}\n", serde_json::to_string(&msg).unwrap())
+                    .expect("Error in System::HandleMessage. Could not write to disk."); // msg object -> json s
+            }
+
+            // Edit virtual log as specified:
+            self.handle_sysrequest(msg);
+        }
+    }
+}
+
 // HandleMessage:
 // Message bookkeeping interface - receives message data, pulls new message data for the handler to send/
 // Returns to_send***
@@ -139,36 +174,7 @@ impl<B: BroadcastAlgorithm<UnderlyingMessage=SystemRequestMessage>> HandleMessag
     fn handle_message(&mut self, m: &Self::Message) -> Vec<(Self::Pid, Self::Message)> {
         // Deliver message (edit files) as necessary.
         let to_send = self.broadcast.handle_message(m);
-        while let Ok(msg) = self.receiver.try_recv() {
-            // Add message to virtual log.
-            self.log.push(msg.clone());
-
-            // Add message to disk log. (AT THE MOMENT - do so after every message, rather than flushing the log periodically.)
-            // Possible TODO - update ofr efficiency.
-            if self.should_write_to_log {
-            	write!(self.disk_log, "{}\n", serde_json::to_string(&msg).unwrap()).expect("Error in System::HandleMessage. Could not write to disk."); // msg object -> json s       
-            }
-
-            // Edit virtual log as specified:
-            match msg {
-                SystemRequestMessage::Create(filename) => {
-                    self.files.entry(filename).or_insert("".into());
-                    // Write log to disk
-                },
-                SystemRequestMessage::Delete(filename) => {
-                    self.files.remove(&filename);
-                    // TODO - error handling (file does not exist)
-                },
-                SystemRequestMessage::Append(filename, data) => {
-                    if let Some(content) = self.files.get_mut(&filename) {
-                        content.push_str(data.as_str());
-                    } else {
-                        // TODO - error handling
-                    }
-                },
-            }
-        }
-
+        self.drain_receiver(true);
         to_send
     }
 }

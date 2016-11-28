@@ -576,6 +576,7 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
                             trace!("pinging {} (heartbeat {})", pid, *heartbeat);
                             ct.handle.spawn(sender.clone().send(PeerToPeerMessage::HeartbeatPing).map(|_| ()).map_err(|e| {
                                 warn!("Error sending heartbeat: {:?}", e);
+                                // TODO: these sorts of errors indicate that the connection died, they should trigger a removal in this case
                             }));
                         }
                         if *heartbeat % 10 == 0 {

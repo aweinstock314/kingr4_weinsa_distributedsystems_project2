@@ -40,3 +40,5 @@ for pid in $PIDS; do
     screen -S $SESSIONNAME -p $pid -X stuff ""
     sleep 0.01
 done
+
+rm log_*.txt
