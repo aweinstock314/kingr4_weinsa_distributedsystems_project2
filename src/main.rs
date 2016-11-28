@@ -371,11 +371,17 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
             self.handle.spawn(w.send_all(rx.map_err(move |()| str_to_ioerror(errmsg))).map(|_| ()).map_err(|_| ()));
         }
         fn send_p2p(&self, pid: Pid, m: PeerToPeerMessage) {
-            let &(_, ref sender) = self.peer_heartbeats_and_writers.get(&pid)
-                .expect(&format!("Algorithm tried to send {:?} to nonexistant pid {}", m, pid));
-                // TODO: the expect could be hit if there's a disconnection window, maybe this 
+            if let Some(&(_, ref sender)) = self.peer_heartbeats_and_writers.get(&pid) {
+                let transmit = self.transmit.clone();
+                self.handle.spawn(sender.clone().send(m).map(|_| ()).or_else(move |e| {
+                    warn!("Error sending p2p message: {:?}", e);
+                    transmit.send(ControlMessage::ConsiderDead(pid)).map(|_| ()).map_err(|_| unreachable!())
+                }));
+            } else {
+                // TODO: this branch could be hit if there's a disconnection window, maybe this 
                 //  should do retry logic if pid is in (peer_heartbeats_and_writers - processes)?
-            self.handle.spawn(sender.clone().send(m).map(|_| ()).map_err(|_| unreachable!()));
+                warn!("Algorithm tried to send {:?} to nonexistant pid {}", m, pid)
+            }
         }
     }
 
@@ -461,7 +467,7 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
                                 let f = t.send(ControlMessage::C2S(pid, m)).then(move |x| {
                                     match x {
                                         Err(e) => {
-                                            println!("Error sending a C2S: {:?}", e);
+                                            warn!("Error sending a C2S: {:?}", e);
                                             Ok(None).into_future().boxed()
                                         },
                                         Ok(t) => {
@@ -492,7 +498,7 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
                                 let f = t.send(ControlMessage::P2P(pid, m)).then(move |x| {
                                     match x {
                                         Err(e) => {
-                                            println!("Error sending a P2P: {:?}", e);
+                                            warn!("Error sending a P2P: {:?}", e);
                                             Ok(None).into_future().boxed()
                                         },
                                         Ok(t) => {
@@ -537,10 +543,12 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
                             }
                         },
                         PeerToPeerMessage::HeartbeatPing => {
-                            let &mut (ref mut heartbeat, _) = ct.peer_heartbeats_and_writers.get_mut(&pid)
-                                .expect("Recieved a heartbeat from someone we're not connected to (somehow)");
-                            trace!("heard from {}, resetting their heartbeat from {} to 0", pid, *heartbeat);
-                            *heartbeat = 0;
+                            if let Some(&mut (ref mut heartbeat, _)) = ct.peer_heartbeats_and_writers.get_mut(&pid) {
+                                trace!("heard from {}, resetting their heartbeat from {} to 0", pid, *heartbeat);
+                                *heartbeat = 0;
+                            } else {
+                                warn!("Recieved a heartbeat from someone ({}) we're not connected to", pid);
+                            }
                         },
                     }
                 },
@@ -568,25 +576,25 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
                             warn!("Error connecting to peer {:?}: {:?}", pid, e);
                         }));
                     }
-                    let mut to_remove = HashSet::new();
                     for (&pid, &mut (ref mut heartbeat, ref mut sender)) in ct.peer_heartbeats_and_writers.iter_mut() {
                         trace!("incrementing heartbeat for {} (old value: {})", pid, *heartbeat);
                         *heartbeat += 1;
                         if *heartbeat % 3 == 0 {
                             trace!("pinging {} (heartbeat {})", pid, *heartbeat);
-                            ct.handle.spawn(sender.clone().send(PeerToPeerMessage::HeartbeatPing).map(|_| ()).map_err(|e| {
+                            let transmit = ct.transmit.clone();
+                            ct.handle.spawn(sender.clone().send(PeerToPeerMessage::HeartbeatPing).map(|_| ()).or_else(move |e| {
                                 warn!("Error sending heartbeat: {:?}", e);
-                                // TODO: these sorts of errors indicate that the connection died, they should trigger a removal in this case
+                                transmit.send(ControlMessage::ConsiderDead(pid)).map(|_| ()).map_err(|_| unreachable!())
                             }));
                         }
                         if *heartbeat % 10 == 0 {
                             info!("haven't heard from {} in 10 ticks, considering them dead", pid);
-                            to_remove.insert(pid);
+                            ct.handle.spawn(ct.transmit.clone().send(ControlMessage::ConsiderDead(pid)).map(|_| ()).map_err(|_| unreachable!()));
                         }
                     }
-                    for pid in to_remove.iter() {
-                        ct.peer_heartbeats_and_writers.remove(&pid);
-                    }
+                },
+                ControlMessage::ConsiderDead(pid) => {
+                    ct.peer_heartbeats_and_writers.remove(&pid);
                 },
             }
             Ok(())
@@ -637,13 +645,14 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
 enum ControlMessage {
     P2PStart(TcpStream, Option<Pid>),
     ClientStart(TcpStream),
-    NewClient(usize, (ApplicationSource<ServerToClientMessage, ClientToServerMessage>,
+    NewClient(Pid, (ApplicationSource<ServerToClientMessage, ClientToServerMessage>,
                       ApplicationSink<ServerToClientMessage, ClientToServerMessage>)),
-    NewPeer(usize, (ApplicationSource<PeerToPeerMessage, PeerToPeerMessage>,
+    NewPeer(Pid, (ApplicationSource<PeerToPeerMessage, PeerToPeerMessage>,
                     ApplicationSink<PeerToPeerMessage, PeerToPeerMessage>)),
     FinishedClientWrite(usize, ApplicationSink<ServerToClientMessage, ClientToServerMessage>),
-    C2S(usize, ClientToServerMessage),
-    P2P(usize, PeerToPeerMessage),
+    C2S(Pid, ClientToServerMessage),
+    P2P(Pid, PeerToPeerMessage),
+    ConsiderDead(Pid),
     Tick,
 }
 
@@ -663,6 +672,7 @@ impl fmt::Debug for ControlMessage {
             &ControlMessage::FinishedClientWrite(ref pid, _) => fmt.debug_tuple("FinishedClientWrite").field(pid).finish(),
             &ControlMessage::C2S(ref pid, ref m) => fmt.debug_tuple("C2S").field(pid).field(m).finish(),
             &ControlMessage::P2P(ref pid, ref m) => fmt.debug_tuple("P2P").field(pid).field(m).finish(),
+            &ControlMessage::ConsiderDead(ref pid) => fmt.debug_tuple("ConsiderDead").field(pid).finish(),
             &ControlMessage::Tick => fmt.debug_tuple("Tick").finish(),
         }
     }

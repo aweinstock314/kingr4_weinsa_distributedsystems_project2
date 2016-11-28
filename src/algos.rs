@@ -174,6 +174,7 @@ impl<B: BroadcastAlgorithm<UnderlyingMessage=SystemRequestMessage>> HandleMessag
     fn handle_message(&mut self, m: &Self::Message) -> Vec<(Self::Pid, Self::Message)> {
         // Deliver message (edit files) as necessary.
         let to_send = self.broadcast.handle_message(m);
+        // TODO: persist ZAB state (recovery happens wrong without it due to msg_count being reset)
         self.drain_receiver(true);
         to_send
     }
