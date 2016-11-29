@@ -363,14 +363,17 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
         }
         fn insert_writer(&mut self, pid: Pid, w: ApplicationSink<PeerToPeerMessage, PeerToPeerMessage>, errmsg: &'static str) {
             let (tx, rx) = fmpsc::channel(10);
-            /*if let Some((heartbeat, old_tx)) = ct.peer_heartbeats_and_writers.insert(pid, (0, tx)) {
-                trace!("already had an entry for peer {} with heartbeat {}", pid, heartbeat);
+            if let Some((heartbeat, _)) = self.peer_heartbeats_and_writers.insert(pid, (0, tx)) {
+                warn!("Already had an entry for peer {} with heartbeat {}", pid, heartbeat);
                 // TODO: how should this be handled without leaking the old socket/channel?
-            }*/
-            self.peer_heartbeats_and_writers.entry(pid).or_insert((0, tx));
+            }
+            //self.peer_heartbeats_and_writers.entry(pid).or_insert((0, tx));
             self.handle.spawn(w.send_all(rx.map_err(move |()| str_to_ioerror(errmsg))).map(|_| ()).map_err(|_| ()));
         }
         fn send_p2p(&self, pid: Pid, m: PeerToPeerMessage) {
+            if let PeerToPeerMessage::HeartbeatPing = m {} else {
+                debug!("Sending message {:?} to pid {}", m, pid);
+            }
             if let Some(&(_, ref sender)) = self.peer_heartbeats_and_writers.get(&pid) {
                 let transmit = self.transmit.clone();
                 self.handle.spawn(sender.clone().send(m.clone()).map(|_| ()).or_else(move |e| {
@@ -581,7 +584,8 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
                             transmit.send(ControlMessage::P2PStart(sock, Some(pid))).map_err(|_| unreachable!())
                         });
                         ct.handle.spawn(fut.map(|_| ()).map_err(move |e| {
-                            warn!("Error connecting to peer {:?}: {:?}", pid, e);
+                            // This is expected (connection refused) if the server is currently down
+                            trace!("Error connecting to peer {:?}: {:?}", pid, e);
                         }));
                     }
                     for (&pid, &mut (ref mut heartbeat, ref mut sender)) in ct.peer_heartbeats_and_writers.iter_mut() {
@@ -589,10 +593,11 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
                         *heartbeat += 1;
                         if *heartbeat % 3 == 0 {
                             trace!("pinging {} (heartbeat {})", pid, *heartbeat);
-                            let transmit = ct.transmit.clone();
+                            //let transmit = ct.transmit.clone();
                             ct.handle.spawn(sender.clone().send(PeerToPeerMessage::HeartbeatPing).map(|_| ()).or_else(move |e| {
-                                warn!("Error sending heartbeat: {:?}", e);
-                                transmit.send(ControlMessage::ConsiderDead(pid)).map(|_| ()).map_err(|_| unreachable!())
+                                warn!("Error sending heartbeat to {}: {:?}", pid, e);
+                                //transmit.send(ControlMessage::ConsiderDead(pid)).map(|_| ()).map_err(|_| unreachable!())
+                                Ok(())
                             }));
                         }
                         if *heartbeat % 10 == 0 {
@@ -604,8 +609,17 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
                         sender: ct.ownpid,
                         mtype: BullyTypes::Tick,
                     };
-                    /*ct.send_election(ct.ownpid, m);*/
-                    ct.filesystem.broadcast.leader.handle_message(&m);
+                    //ct.send_election(ct.ownpid, m);
+                    //ct.filesystem.broadcast.leader.handle_message(&m);
+                    let m2 = ZabMessage {
+                        sender: ct.ownpid,
+                        initiator: ct.ownpid,
+                        mtype: ZabTypes::Election(m),
+                        count: Zxid::new(),
+                    };
+                    for (pid, m) in ct.filesystem.broadcast.handle_message(&m2) {
+                        ct.send_p2p(pid, PeerToPeerMessage::System(m));
+                    }
                 },
                 ControlMessage::ConsiderDead(pid) => {
                     ct.peer_heartbeats_and_writers.remove(&pid);
@@ -617,7 +631,6 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
                             }
                         }
                     }
-
                 },
             }
             Ok(())

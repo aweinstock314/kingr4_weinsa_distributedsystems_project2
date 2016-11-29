@@ -6,7 +6,7 @@ use broadcasts::BroadcastAlgorithm;
 use serde::{Serialize, Deserialize};
 use serde_json;
 use std::collections::HashMap;
-use std::fmt::Display;
+use std::fmt::{Debug, Display};
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::fs;
@@ -27,7 +27,8 @@ pub trait HandleMessage {
 // Keeps track of - logical filesystem, process message logs.
 // Also carries broadcast to invoke, reciever channel use.
 // Templated over (a) broadcast implementation in broadcasts.rs.
-pub struct System<B:BroadcastAlgorithm<UnderlyingMessage = SystemRequestMessage>> {
+#[derive(Debug)]
+pub struct System<B:BroadcastAlgorithm<UnderlyingMessage = SystemRequestMessage>+Debug> {
     pub broadcast: B, // broadcast algorithm, to access/send messages
     files: HashMap<String, String>, // Maps filename -> filecontent
     receiver: mpsc::Receiver<SystemRequestMessage>,
@@ -38,7 +39,8 @@ pub struct System<B:BroadcastAlgorithm<UnderlyingMessage = SystemRequestMessage>
 // Implementation of System constructor, message handler (which updates the filesystem conditionally)
 impl<B:BroadcastAlgorithm<UnderlyingMessage = SystemRequestMessage>> System<B> where 
     <System<B> as HandleMessage>::Pid: Display,
-    B::Message: Clone + Serialize + Deserialize {
+    B: Debug,
+    B::Message: Clone + Debug + Serialize + Deserialize {
      pub fn new(broadcast: B, pid: <Self as HandleMessage>::Pid) -> System<B> {
         let (transmit, receive) = mpsc::channel();
         let logname = format!("log_{}.txt", pid);
@@ -81,6 +83,7 @@ impl<B:BroadcastAlgorithm<UnderlyingMessage = SystemRequestMessage>> System<B> w
     // Invokes ZAB
     // Forwards client message to the leader as a p2p message with the related data.
     pub fn handle_client_message(&mut self, m: ClientToServerMessage) -> (Vec<(<Self as HandleMessage>::Pid, <Self as HandleMessage>::Message)>, Vec<ServerToClientMessage>) {
+        debug!("System::handle_client_message({:?})", m);
         let mut peer_messages = vec![];
         let mut client_messages = vec![];
 
@@ -130,8 +133,10 @@ pub enum SystemRequestMessage {
     Append(String, String),
 }
 
-impl<B: BroadcastAlgorithm<UnderlyingMessage=SystemRequestMessage>> System<B> {
+impl<B: BroadcastAlgorithm<UnderlyingMessage=SystemRequestMessage>> System<B> where
+    B: Debug, B::Message: Debug {
     fn handle_sysrequest(&mut self, msg: SystemRequestMessage) {
+        debug!("System::handle_sysrequest: msg = {:?}", msg);
         match msg {
             SystemRequestMessage::Create(filename) => {
                 self.files.entry(filename).or_insert("".into());
@@ -150,6 +155,7 @@ impl<B: BroadcastAlgorithm<UnderlyingMessage=SystemRequestMessage>> System<B> {
         }
     }
     fn drain_receiver(&mut self) {
+        trace!("System::drain_receiver: self = {:?}", self);
         while let Ok(msg) = self.receiver.try_recv() {
             // Edit virtual log as specified:
             self.handle_sysrequest(msg);
@@ -161,10 +167,12 @@ impl<B: BroadcastAlgorithm<UnderlyingMessage=SystemRequestMessage>> System<B> {
 // Message bookkeeping interface - receives message data, pulls new message data for the handler to send/
 // Returns to_send***
 impl<B: BroadcastAlgorithm<UnderlyingMessage=SystemRequestMessage>> HandleMessage for System<B> where
-    B::Message: Clone + Serialize + Deserialize {
+    B: Debug,
+    B::Message: Clone + Debug + Serialize + Deserialize {
     type Pid = B::Pid;
     type Message = B::Message;
     fn handle_message(&mut self, m: &Self::Message) -> Vec<(Self::Pid, Self::Message)> {
+        trace!("System::handle_message({:?}, {:?})", self, m);
         if let Some(ref mut disk_log) = self.disk_log {
             // Add message to virtual log.
             self.log.push(m.clone());
