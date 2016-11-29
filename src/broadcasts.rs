@@ -84,9 +84,9 @@ impl<Pid: Eq+Hash+Copy, Msg: Clone> BroadcastAlgorithm for SendAll<Pid, Msg> {
 // PIDs are arbitrary, leaders are semi-arbitrary. FUTURE COMPLEXITY TODO - leader preference based on log size
 // Will always elect highest available PID.
 #[derive(Debug)]
-struct BullyState<Pid: Eq+Hash> {
+pub struct BullyState<Pid: Eq+Hash> {
     own_pid: Pid,
-    leader_pid: Option<Pid>, // This being None implies holding_election = true
+    pub leader_pid: Option<Pid>, // This being None implies holding_election = true
     tick_counter: usize,
     recvd_okay: bool,
     recvd_coord: bool,
@@ -95,8 +95,8 @@ struct BullyState<Pid: Eq+Hash> {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BullyMessage<Pid> {
-    sender: Pid,
-    mtype: BullyTypes,
+    pub sender: Pid,
+    pub mtype: BullyTypes,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -107,7 +107,7 @@ pub enum BullyTypes {
     Tick, // to increment internal counter when waiting on Okay
 }
 
-impl<Pid: Eq+Hash+Copy+Ord> HandleMessage for BullyState<Pid> {
+impl<Pid: Debug+Eq+Hash+Copy+Ord> HandleMessage for BullyState<Pid> {
     type Pid = Pid;
     type Message = BullyMessage<Pid>;
     
@@ -149,7 +149,7 @@ impl<Pid: Eq+Hash+Copy+Ord> HandleMessage for BullyState<Pid> {
 }
 
 // To be invoked when a leader election is started (when a heartbeat detection fails)
-impl<Pid: Eq+Hash+Copy+Ord> BullyState<Pid> {
+impl<Pid: Debug+Eq+Hash+Copy+Ord> BullyState<Pid> {
     pub fn new(pid:Pid, processes:HashSet<Pid>, initial_leader:Pid) -> BullyState<Pid> {
         let b = BullyState {
             own_pid: pid,
@@ -164,6 +164,7 @@ impl<Pid: Eq+Hash+Copy+Ord> BullyState<Pid> {
 
     // initalize an election - send Election message to processes with higher Pids
     pub fn init(&mut self) -> Vec<(Pid, BullyMessage<Pid>)> {
+        info!("BullyState::init({:?})", self);
         self.recvd_coord = false;
         self.recvd_okay = false;
         self.tick_counter = 0;
@@ -180,7 +181,7 @@ pub struct Zxid {
 }
 
 impl Zxid {
-    fn new() -> Zxid {
+    pub fn new() -> Zxid {
         Zxid {
             epoch: 0,
             counter: 0,
@@ -193,7 +194,7 @@ pub struct Zab<Pid:Eq+Hash, Msg> {
     ack_count: HashMap<Zxid, usize>, // a counter of acknowledgments recieved from peers <zxid, ackcount>
     next_msg: Zxid, // next_msg = (e, c) => the next expected message has zxid (e, c)
     msg_q: HashMap<Zxid, Msg>, // Queued messages, waiting to be delievered in broadcast FIFO order. Will be delivered when next_msg.pop() = msg.counter
-    leader: BullyState<Pid>, // stored PID of leader process 
+    pub leader: BullyState<Pid>, // stored PID of leader process 
     own_pid: Pid,
     processes: HashSet<Pid>,
     deliver: Box<FnMut(&Msg)>,
@@ -213,7 +214,7 @@ impl<Pid: Debug+Eq+Hash, Msg: Debug> Debug for Zab<Pid, Msg> {
     }
 }
 
-impl<Pid: Copy+Eq+Hash+Ord, Msg> Zab<Pid, Msg> {
+impl<Pid: Debug+Copy+Eq+Hash+Ord, Msg> Zab<Pid, Msg> {
     pub fn new(processes: HashSet<Pid>, deliver: Box<FnMut(&Msg)>, initial_leader: Pid, own_pid: Pid) -> Zab<Pid, Msg> {
         Zab {
             zxid: Zxid::new(),
@@ -242,10 +243,10 @@ impl<Pid:Clone+Copy+Eq+Hash, Msg:Clone> Zab<Pid, Msg> {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ZabMessage<Pid, Message> {
-    sender: Pid, // sender of this specific message
-    initiator: Pid, // sender of this chain of messages (i.e. who the client connected to)
-    mtype: ZabTypes<Pid, Message>,
-    count: Zxid,
+    pub sender: Pid, // sender of this specific message
+    pub initiator: Pid, // sender of this chain of messages (i.e. who the client connected to)
+    pub mtype: ZabTypes<Pid, Message>,
+    pub count: Zxid,
 }
 
 // enum of message types for ZAB
@@ -286,7 +287,10 @@ impl<Pid: Eq+Hash+Copy+Debug+Ord, Msg: Clone+Debug> HandleMessage for Zab<Pid, M
     type Message = ZabMessage<Pid, Msg>;
 
     fn handle_message(&mut self, m: &Self::Message) -> Vec<(Self::Pid, Self::Message)> {
-        debug!("In Zab::handle_message\ncurrent state: {:?}\nmessage: {:?}", self, m);
+        if let ZabTypes::Election(BullyMessage {mtype: BullyTypes::Tick,..}) = m.mtype {} else {
+            debug!("In Zab::handle_message\ncurrent state: {:?}\nmessage: {:?}", self, m);
+        } 
+
         let mut to_send = Vec::new();
 
         // If it recieves a leader election protocol
@@ -347,8 +351,9 @@ impl<Pid: Eq+Hash+Copy+Debug+Ord, Msg: Clone+Debug> HandleMessage for Zab<Pid, M
                     }
                     self.zxid.counter += 1; // advance the local message counter on commit 
                 }
-
-                debug!("State at end of Zab::handle_message: {:?}", self);
+                if let ZabTypes::Election(BullyMessage {mtype: BullyTypes::Tick,..}) = m.mtype {} else {
+                    debug!("State at end of Zab::handle_message: {:?}", self);
+                } 
                 to_send
             }
         }

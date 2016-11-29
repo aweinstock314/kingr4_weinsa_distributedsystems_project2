@@ -28,7 +28,7 @@ pub trait HandleMessage {
 // Also carries broadcast to invoke, reciever channel use.
 // Templated over (a) broadcast implementation in broadcasts.rs.
 pub struct System<B:BroadcastAlgorithm<UnderlyingMessage = SystemRequestMessage>> {
-    broadcast: B, // broadcast algorithm, to access/send messages
+    pub broadcast: B, // broadcast algorithm, to access/send messages
     files: HashMap<String, String>, // Maps filename -> filecontent
     receiver: mpsc::Receiver<SystemRequestMessage>,
     log: Vec<B::Message>, // Virtual log of messages sent/recieved since last save-to-disk

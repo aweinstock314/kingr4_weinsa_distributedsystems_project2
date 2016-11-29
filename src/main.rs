@@ -373,8 +373,8 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
         fn send_p2p(&self, pid: Pid, m: PeerToPeerMessage) {
             if let Some(&(_, ref sender)) = self.peer_heartbeats_and_writers.get(&pid) {
                 let transmit = self.transmit.clone();
-                self.handle.spawn(sender.clone().send(m).map(|_| ()).or_else(move |e| {
-                    warn!("Error sending p2p message: {:?}", e);
+                self.handle.spawn(sender.clone().send(m.clone()).map(|_| ()).or_else(move |e| {
+                    warn!("Error sending p2p({:?}) message: {:?}", m, e);
                     transmit.send(ControlMessage::ConsiderDead(pid)).map(|_| ()).map_err(|_| unreachable!())
                 }));
             } else {
@@ -382,6 +382,14 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
                 //  should do retry logic if pid is in (peer_heartbeats_and_writers - processes)?
                 warn!("Algorithm tried to send {:?} to nonexistant pid {}", m, pid)
             }
+        }
+        fn send_election(&self, pid: Pid, m: BullyMessage<Pid>) {
+            self.send_p2p(pid, PeerToPeerMessage::System(ZabMessage {
+                sender: self.ownpid,
+                initiator: self.ownpid,
+                mtype: ZabTypes::Election(m),
+                count: Zxid::new(),
+            }));
         }
     }
 
@@ -495,10 +503,10 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
                     let readerstream = r.into_future().and_then(move |r| {
                         unfold((transmit, r), move |(t, (r_cur, r_next))| {
                             if let Some(m) = r_cur {
-                                let f = t.send(ControlMessage::P2P(pid, m)).then(move |x| {
+                                let f = t.send(ControlMessage::P2P(pid, m.clone())).then(move |x| {
                                     match x {
                                         Err(e) => {
-                                            warn!("Error sending a P2P: {:?}", e);
+                                            warn!("Error sending a P2P({:?}): {:?}", m, e);
                                             Ok(None).into_future().boxed()
                                         },
                                         Ok(t) => {
@@ -592,9 +600,24 @@ fn server_main(args: Vec<String>, nodes_fname: String) {
                             ct.handle.spawn(ct.transmit.clone().send(ControlMessage::ConsiderDead(pid)).map(|_| ()).map_err(|_| unreachable!()));
                         }
                     }
+                    let m = BullyMessage {
+                        sender: ct.ownpid,
+                        mtype: BullyTypes::Tick,
+                    };
+                    /*ct.send_election(ct.ownpid, m);*/
+                    ct.filesystem.broadcast.leader.handle_message(&m);
                 },
                 ControlMessage::ConsiderDead(pid) => {
                     ct.peer_heartbeats_and_writers.remove(&pid);
+                    if let Some(leader) = ct.filesystem.broadcast.leader.leader_pid {
+                        if leader == pid {
+                            let to_send = ct.filesystem.broadcast.leader.init();
+                            for (pid, m) in to_send {
+                                ct.send_election(pid, m);
+                            }
+                        }
+                    }
+
                 },
             }
             Ok(())
