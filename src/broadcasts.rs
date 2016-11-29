@@ -5,8 +5,7 @@
 //for algorithimic message handling (ZAB, etc) 
 
 use algos::HandleMessage;
-use std::collections::{HashMap};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fmt::Debug;
 use std::hash::Hash;
@@ -112,40 +111,38 @@ impl<Pid: Eq+Hash+Copy+Ord> HandleMessage for BullyState<Pid> {
     type Pid = Pid;
     type Message = BullyMessage<Pid>;
     
-    fn handle_message(&mut self, m: &Self::Message) -> Vec<(Self::Pid, Self::Message)> {
-        if let None = self.leader_pid {    
-            match m.mtype {
-                BullyTypes::Tick => {
-                    self.tick_counter += 1;
-                    if self.tick_counter >= 10 {
-                        // if haven't heard from anyone else, assume nobody higher exists to be leader. send coord to (lower) others. 
-                        if self.recvd_okay == false {
-                            self.leader_pid = Some(self.own_pid);
-                            let msg = BullyMessage { sender: self.own_pid, mtype: BullyTypes::Election };
-                            return self.processes.iter().filter_map(|&pid| if pid < self.own_pid {Some((pid, msg.clone()))} else {None}).collect();
-                        } 
-                    }
-                    // if it hits this, it should not have recieved a coord message. start a new election.
-                    if (self.tick_counter) >= 20 {
-                        return self.init();
-                    }
+    fn handle_message(&mut self, m: &Self::Message) -> Vec<(Self::Pid, Self::Message)> { 
+        match m.mtype {
+            BullyTypes::Tick => if let None = self.leader_pid {
+                self.tick_counter += 1;
+                if self.tick_counter >= 10 {
+                    // if haven't heard from anyone else, assume nobody higher exists to be leader. send coord to (lower) others. 
+                    if self.recvd_okay == false {
+                        self.leader_pid = Some(self.own_pid);
+                        let msg = BullyMessage { sender: self.own_pid, mtype: BullyTypes::Election };
+                        return self.processes.iter().filter_map(|&pid| if pid < self.own_pid {Some((pid, msg.clone()))} else {None}).collect();
+                    } 
                 }
-                // on receipt of election acknowledgement 
-                BullyTypes::Okay => {
-                    self.recvd_okay = true;
+                // if it hits this, it should not have recieved a coord message. start a new election.
+                if self.tick_counter >= 20 {
+                    return self.init();
                 }
-                // on receipt of election notification
-                BullyTypes::Election => {
-                    self.leader_pid = None;
-                    let msg = BullyMessage { sender: self.own_pid, mtype: BullyTypes::Okay };
-                    return vec![(m.sender, msg.clone())];
-                }
-                // on receipt of coord message from new leader
-                BullyTypes::Coordinator => {
-                    self.recvd_coord = true;
-                    self.leader_pid = Some(m.sender);
-                }                    
-            }
+            },
+            // on receipt of election acknowledgement 
+            BullyTypes::Okay => {
+                self.recvd_okay = true;
+            },
+            // on receipt of election notification
+            BullyTypes::Election => {
+                self.leader_pid = None;
+                let msg = BullyMessage { sender: self.own_pid, mtype: BullyTypes::Okay };
+                return vec![(m.sender, msg.clone())];
+            },
+            // on receipt of coord message from new leader
+            BullyTypes::Coordinator => {
+                self.recvd_coord = true;
+                self.leader_pid = Some(m.sender);
+            },
         }
         vec![]
     }
@@ -167,18 +164,35 @@ impl<Pid: Eq+Hash+Copy+Ord> BullyState<Pid> {
 
     // initalize an election - send Election message to processes with higher Pids
     pub fn init(&mut self) -> Vec<(Pid, BullyMessage<Pid>)> {
+        self.recvd_coord = false;
+        self.recvd_okay = false;
+        self.tick_counter = 0;
         self.leader_pid = None;
         let m = BullyMessage { sender: self.own_pid, mtype: BullyTypes::Election };
         self.processes.iter().filter_map(|&pid| if pid > self.own_pid {Some((pid, m.clone()))} else {None}).collect()
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, Serialize, Deserialize, PartialEq)]
+pub struct Zxid {
+    epoch: usize, // Incremented after every leader election. 
+    counter: usize, // A counter sent along with each message, to ensure that messages are delivered in FIFO order. Unique to each epoch. 
+}
+
+impl Zxid {
+    fn new() -> Zxid {
+        Zxid {
+            epoch: 0,
+            counter: 0,
+        }
+    }
+}
 // ZAB struct: Stores bookkeeping data for Zookeeper Atomic Broadcast HandleMessage implementation.
 pub struct Zab<Pid:Eq+Hash, Msg> {
-    msg_count: usize, // a counter sent along with each message, to ensure that messages are delivered in FIFO order
-    ack_count: HashMap<usize, usize>, // a counter of acknowledgments recieved from peers <messagecount, ackcount>
-    next_msgs: HashMap<Pid, usize>, // (p, i) \in next_msgs => the next expected message from process p has message counter i
-    msg_q: VecDeque<(usize, Msg)>, // Queued messages, waiting to be delievered in broadcast FIFO order. Will be delivered when next_msg.pop() = msg.counter
+    zxid: Zxid,
+    ack_count: HashMap<Zxid, usize>, // a counter of acknowledgments recieved from peers <zxid, ackcount>
+    next_msg: Zxid, // next_msg = (e, c) => the next expected message has zxid (e, c)
+    msg_q: HashMap<Zxid, Msg>, // Queued messages, waiting to be delievered in broadcast FIFO order. Will be delivered when next_msg.pop() = msg.counter
     leader: BullyState<Pid>, // stored PID of leader process 
     own_pid: Pid,
     processes: HashSet<Pid>,
@@ -188,9 +202,9 @@ pub struct Zab<Pid:Eq+Hash, Msg> {
 impl<Pid: Debug+Eq+Hash, Msg: Debug> Debug for Zab<Pid, Msg> {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
         fmt.debug_struct("Zab")
-            .field("msg_count", &self.msg_count)
+            .field("zxid", &self.zxid)
             .field("ack_count", &self.ack_count)
-            .field("next_msgs", &self.next_msgs)
+            .field("next_msg", &self.next_msg)
             .field("msg_q", &self.msg_q)
             .field("leader", &self.leader)
             .field("own_pid", &self.own_pid)
@@ -202,10 +216,10 @@ impl<Pid: Debug+Eq+Hash, Msg: Debug> Debug for Zab<Pid, Msg> {
 impl<Pid: Copy+Eq+Hash+Ord, Msg> Zab<Pid, Msg> {
     pub fn new(processes: HashSet<Pid>, deliver: Box<FnMut(&Msg)>, initial_leader: Pid, own_pid: Pid) -> Zab<Pid, Msg> {
         Zab {
-            msg_count: 0,
+            zxid: Zxid::new(),
             ack_count: HashMap::new(),
-            next_msgs: processes.iter().map(|&p| (p, 0)).collect(),
-            msg_q: VecDeque::new(),
+            next_msg: Zxid::new(),
+            msg_q: HashMap::new(),
             leader: BullyState::new(own_pid, processes.clone(), initial_leader),
             own_pid: own_pid,
             processes: processes,
@@ -216,7 +230,7 @@ impl<Pid: Copy+Eq+Hash+Ord, Msg> Zab<Pid, Msg> {
 
 impl<Pid:Clone+Copy+Eq+Hash, Msg:Clone> Zab<Pid, Msg> {
     fn internal_broadcast(&mut self, initiator: Pid, z: ZabTypes<Pid, Msg>) -> Vec<(Pid, ZabMessage<Pid,Msg>)> {
-        let m = ZabMessage { sender: self.own_pid, initiator: initiator, mtype: z, count: self.msg_count };
+        let m = ZabMessage { sender: self.own_pid, initiator: initiator, mtype: z, count: self.zxid };
         self.processes.iter().map(|pid| (*pid, m.clone())).collect()
     }
 }
@@ -231,7 +245,7 @@ pub struct ZabMessage<Pid, Message> {
     sender: Pid, // sender of this specific message
     initiator: Pid, // sender of this chain of messages (i.e. who the client connected to)
     mtype: ZabTypes<Pid, Message>,
-    count: usize,
+    count: Zxid,
 }
 
 // enum of message types for ZAB
@@ -278,68 +292,65 @@ impl<Pid: Eq+Hash+Copy+Debug+Ord, Msg: Clone+Debug> HandleMessage for Zab<Pid, M
         // If it recieves a leader election protocol
         if let ZabTypes::Election(ref underlying) = m.mtype {
             let bully_messages = self.leader.handle_message(underlying);
-            to_send.extend(bully_messages.into_iter().map(|(pid, m_)| (pid, ZabMessage {sender: self.own_pid, initiator: m.initiator,  mtype: ZabTypes::Election(m_), count: self.msg_count} )));
-            // TODO: early return? (test in a seperate commit)
-        }
-        
-        if let Some(leader) = self.leader.leader_pid {
-            if self.own_pid == leader {
-                // Manage ack from processes.
-                if let ZabTypes::Ack = m.mtype {
-                    let ac = {
-                        let ac = self.ack_count.entry(m.count).or_insert(0);
-                        *ac += 1;
-                        *ac 
-                    };
-                    if ac > (self.processes.len()/2) + 1 { // TODO - double check majority arithmetic?     
-                        // send commit to all, including self. (will follow protocol below) 
-                        to_send.extend(self.internal_broadcast(m.initiator, ZabTypes::Commit));
-                        self.msg_count += 1;
-                    }
-                    // if we've recieved Ack from everyone (except the leader) for this message, we can save memory by cleaning up the ack_count entry
-                    if ac == self.processes.len() - 1 {
-                        self.ack_count.remove(&m.count);
-                    }
-                } 
-                // Broadcast SendAll message to followers if the message has been forwarded from the client.
-                if let ZabTypes::Forwarded(ref underlying) = m.mtype {
-                    self.msg_q.push_back((m.count, underlying.clone()));
-                    to_send.extend(self.internal_broadcast(m.initiator, ZabTypes::SendAll(underlying.clone())));
-                }
-            } else {
-                // If process is not the leader, manage FIFO & commit-based delivery locally.
-                if let ZabTypes::SendAll(ref underlying) = m.mtype {
-                    // store in message queue
-                    self.msg_q.push_back((m.count, underlying.clone()));
-
-                    // send ack to leader 
-                    to_send.extend(self.internal_broadcast(m.initiator, ZabTypes::Ack));
-                }
+            to_send.extend(bully_messages.into_iter().map(|(pid, m_)| (pid, ZabMessage {sender: self.own_pid, initiator: m.initiator,  mtype: ZabTypes::Election(m_), count: self.zxid} )));
+            // Don't interrupt the current election
+            if let None = self.leader.leader_pid {
+                return to_send;
             }
-            // Both leader and follower processes respond to commit
-            if let ZabTypes::Commit = m.mtype { 
-                // loop through msg_q to find the next counter.
-                // if it matches the expected next message for its sender, invoke deliver.
-                let mut next = self.next_msgs.get_mut(&m.initiator).expect(&format!("Received a message ({:?}) from a pid ({:?}) not in next_msgs", m, m.sender));
-                let mut to_remove = None;
-                // TODO: consider replacing iteration over a VecDeque with a HashMap for performance
-                for (i,&(c, ref u)) in self.msg_q.iter().enumerate() {
-                    if c == *next {
-                        to_remove = Some(i);
+        } 
+        match self.leader.leader_pid { // if there's no leader, hold an election
+            None => {
+                self.leader.init().into_iter().map(|(pid, m)| {
+                    (pid, ZabMessage {sender: self.own_pid, initiator: self.own_pid, mtype: ZabTypes::Election(m), count: self.zxid} )
+                }).collect() 
+            },
+            Some(leader) => {
+                if self.own_pid == leader {
+                    // Manage ack from processes.
+                    if let ZabTypes::Ack = m.mtype {
+                        let ac = {
+                            let ac = self.ack_count.entry(m.count).or_insert(0);
+                            *ac += 1;
+                            *ac 
+                        };
+                        if ac > (self.processes.len()/2) + 1 { // TODO - double check majority arithmetic?     
+                            // send commit to all, including self. (will follow protocol below) 
+                            to_send.extend(self.internal_broadcast(m.initiator, ZabTypes::Commit));
+                        }
+                        // if we've recieved Ack from everyone (except the leader) for this message, we can save memory by cleaning up the ack_count entry
+                        if ac == self.processes.len() - 1 {
+                            self.ack_count.remove(&m.count);
+                        }
+                    } 
+                    // Broadcast SendAll message to followers if the message has been forwarded from the client.
+                    if let ZabTypes::Forwarded(ref underlying) = m.mtype {
+                        self.msg_q.insert(m.count, underlying.clone());
+                        to_send.extend(self.internal_broadcast(m.initiator, ZabTypes::SendAll(underlying.clone())));
+                    }
+                } else {
+                    // If process is not the leader, manage FIFO & commit-based delivery locally.
+                    if let ZabTypes::SendAll(ref underlying) = m.mtype {
+                        // store in message queue
+                        self.msg_q.insert(m.count, underlying.clone());
+
+                        // send ack to leader 
+                        to_send.extend(self.internal_broadcast(m.initiator, ZabTypes::Ack));
+                    }
+                }
+                // Both leader and follower processes respond to commit
+                if let ZabTypes::Commit = m.mtype { 
+                    // loop through msg_q to find the next counter.
+                    // if it matches the expected next message for its sender, invoke deliver.
+                    while let Some(u) = self.msg_q.remove(&self.next_msg) {
                         (self.deliver)(&u);
-                        *next += 1;
-                        break;
+                        self.next_msg.counter += 1;
                     }
+                    self.zxid.counter += 1; // advance the local message counter on commit 
                 }
-                if let Some(i) = to_remove {
-                    self.msg_q.swap_remove_back(i);
-                }
-            }
 
-            debug!("State at end of Zab::handle_message: {:?}", self);
-            to_send
-        } else { // if there's no leader, hold an election
-            self.leader.init().into_iter().map(|(pid, m)| (pid, ZabMessage {sender: self.own_pid, initiator: self.own_pid, mtype: ZabTypes::Election(m), count: self.msg_count} )).collect()
+                debug!("State at end of Zab::handle_message: {:?}", self);
+                to_send
+            }
         }
     }
 }
@@ -351,9 +362,9 @@ impl<Pid: Eq+Hash+Copy+Debug+Ord, Msg: Clone+Debug> BroadcastAlgorithm for Zab<P
     }
     fn broadcast(&mut self, m: &Self::UnderlyingMessage) -> Vec<(Self::Pid, Self::Message)> {
         if let Some(leader) = self.leader.leader_pid {
-            vec![(leader, ZabMessage { sender: self.own_pid, initiator: self.own_pid, mtype: ZabTypes::Forwarded(m.clone()), count: self.msg_count })]
+            vec![(leader, ZabMessage { sender: self.own_pid, initiator: self.own_pid, mtype: ZabTypes::Forwarded(m.clone()), count: self.zxid })]
         } else { // if there's no leader, hold an election
-            self.leader.init().into_iter().map(|(pid, m)| (pid, ZabMessage {sender: self.own_pid, initiator: self.own_pid, mtype: ZabTypes::Election(m), count: self.msg_count} )).collect()
+            self.leader.init().into_iter().map(|(pid, m)| (pid, ZabMessage {sender: self.own_pid, initiator: self.own_pid, mtype: ZabTypes::Election(m), count: self.zxid} )).collect()
         }
     }
 }
