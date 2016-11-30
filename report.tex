@@ -1,5 +1,5 @@
 \documentclass{article}
-\usepackage[a4paper, total={6in, 8.5in}]{geometry}
+\usepackage[a4paper, total={8in, 10.5in}]{geometry}
 \begin{document}
 \section*{}
 Avi Weinstock \\
@@ -29,53 +29,68 @@ Distributed Systems\\
     Six Rust files define the relative functionality for this program:
 \begin{itemize}
         \item\textbf{algos.rs} contains functionality for each process to update, maintain, and back up the program's file system. To facilitate this, it also houses message handlers for committed client actions (creating, deleting, or appending files). It also contains a message handler for messages recieved by the process from a connected client.
-        \item\textbf{broadcasts.rs} interfaces with the networking code, providing algorithmic oversight to the sending and recieving of messages. It contains structs to manage ZAB and Bully Leader Election respectively. It invokes Algos.rs message handling on Zookeeper-delivery of a message to edit a process' filesystem.
+        \item\textbf{broadcasts.rs} interfaces with the networking code, providing algorithmic oversight to the sending and recieving of messages. It contains structs to manage ZAB and Bully Leader Election respectively. It invokes \verb|algos.rs| message handling on Zookeeper-delivery of a message to edit a process' filesystem.
         \item\textbf{framing\_helpers.rs} alkfjsldkjfsdf
         \item\textbf{nodes.txt} lists processes in the system. Each contains a respective PID, IP address, and port numbers for connecting to clients and peer processes, respectively.
-        \item\textbf{parsers.rs} contains functionality to parse nodes.txt. This functionality is used in Main.rs.
+        \item\textbf{parsers.rs} contains functionality to parse nodes.txt. This functionality is used in \verb|main.rs|.
         \item\textbf{main.rs} aslkaslkdj
 \end{itemize}
 
     Messages are sent between processes as serialized json data. There are several types of messages that can be passed around between processes and clients. :
 \begin{itemize}
-        \item\textbf{ServerToClientMessage} is defined in Algos.rs and contains a string to display on console for human viewing. It is sent from the server to the client on receipt of a client request.
-        \item\textbf{ClientToServerMessage} is defined in Algos.rs and contains actions requested by client, recieved by a process, and forwarded to the program leader. The four types of ClientToServerMessages reflect the four types of client requests: create, delete, append, and read. They each carry the name of the file they act upon, and in the case of append, the data to add to that file. These messages are sent from a process connected to a client to a leader process.
-        \item\textbf{SystemRequestMessage} is defined in Algos.rs and defines actions to perform on the commit/delivery of a client request. Actions are create, delete, and append. These messages are sent from a leader to a process.
-        \item\textbf{ZABMessage} is defined in Broadcasts.rs and defines a set of messages used to manage Zookeeper Atomic Broadcast. Commit and Ack are two messages used to model a Two Phase commit broadcast. Forwarded is a message type used to flag a message from a peer that is passing along a client request. SendAll is a message type used to flag messages to send to every process in the system. Election is a message type used to encapsulate BullyMessages passed between processes during a leader election, as they are handled first using a ZAB message handling function. These messages are sent between follower and leader processes.
-        \item\textbf{BullyMessage} is defined in Broadcasts.rs. They define four types of messages that are passed around to facilitate Bully leader election: Election, Coordinator, Okay, and Tick (which is used to determine time passed during the election.) They are passed between processes as they determine who should be the next defined program leader.
+        \item\textbf{ServerToClientMessage} is defined in \verb|algos.rs| and contains a string to display on console for human viewing. It is sent from the server to the client on receipt of a client request.
+        \item\textbf{ClientToServerMessage} is defined in \verb|algos.rs| and contains actions requested by client, recieved by a process, and forwarded to the program leader. The four types of ClientToServerMessages reflect the four types of client requests: create, delete, append, and read. They each carry the name of the file they act upon, and in the case of append, the data to add to that file. These messages are sent from a process connected to a client to a leader process.
+        \item\textbf{SystemRequestMessage} is defined in \verb|algos.rs| and defines actions to perform on the commit/delivery of a client request. Actions are create, delete, and append. These messages are sent from a leader to a process.
+        \item\textbf{ZABMessage} is defined in \verb|broadcasts.rs| and defines a set of messages used to manage Zookeeper Atomic Broadcast. Commit and Ack are two messages used to model a Two Phase commit broadcast. Forwarded is a message type used to flag a message from a peer that is passing along a client request. SendAll is a message type used to flag messages to send to every process in the system. Election is a message type used to encapsulate BullyMessages passed between processes during a leader election, as they are handled first using a ZAB message handling function. These messages are sent between follower and leader processes.
+        \item\textbf{BullyMessage} is defined in \verb|broadcasts.rs|. They define four types of messages that are passed around to facilitate Bully leader election: Election, Coordinator, Okay, and Tick (which is used to determine time passed during the election.) They are passed between processes as they determine who should be the next defined program leader.
 \end{itemize}
 
     \subsubsection*{Filesystem}
-        Every processes maintains a logical filesystem in the System struct, as defined in Algos.rs. Files managed by processes in the program are stored in "files", a HashMap that maps a file's name to its contents. The System struct also handles messages and message logs for a process. When a process is cleared to commit/deliver a requested action, as determined by the ZAB algorithm, that action is forwarded to them in the form of a SystemRequestMessage. The System struct handles that message by writing it to a log vector, writing that vetor entry to a file on disk, and then performing the perscribed action on its logical filesystem. In summary, a process' System determines behavior on commit/delivery of a peer message.
+        Every processes maintains a logical filesystem in the System struct, as defined in \verb|algos.rs|. Files managed by processes in the program are stored in "files", a HashMap that maps a file's name to its contents. The System struct also handles messages and message logs for a process. When a process is cleared to commit/deliver a requested action, as determined by the ZAB algorithm, that action is forwarded to them in the form of a SystemRequestMessage. The System struct handles that message by writing it to a log vector, writing that vetor entry to a file on disk, and then performing the perscribed action on its logical filesystem. In summary, a process' System determines behavior on commit/delivery of a peer message.
 
         As a side functionality, the System struct also handles messages recieved from clients, forwarding them to the leader by way of a stored broadcast object. This broadcast object compartmentalizes logic for sending, recieving, and delivering messages between processes. In this program, broadcast implements the Zookeeper Atomic Broacast. See Algorithms section for more details. Its construction also handles data recovery on initialization.
 
     \subsubsection*{Network Configuration}
-        Processes are listed in nodes.txt. Each contains a respective PID, IP address, and port numbers for connecting to clients and peer processes, respectively. The functionality for parsing this data is located in parsers.rs, and is run in main.rs when the system is initialized.
+        Processes are listed in nodes.txt. Each contains a respective PID, IP address, and port numbers for connecting to clients and peer processes, respectively. The functionality for parsing this data is located in \verb|parsers.rs|, and is run in \verb|main.rs| when the system is initialized.
 
     \subsubsection*{Initialization}
         The system is initialized at startup as follows:
 
-        Main runs:
-                parse node data.
-                init networking
-                create processes:
-                    init ZAB broadcast object
-                    init System, pass it ZAB
+\begin{itemize}
+\item
+    Main runs:
+    \begin{itemize}
+        \item parse node data.
+        \item init networking
+        \item create processes:
+        \begin{itemize}
+            \item init ZAB broadcast object
+            \item init System, pass it ZAB
+        \end{itemize}
+    \end{itemize}
+\item
+    Networking init:
+    \begin{itemize}
+        \item
+    \end{itemize}
+\item
+    ZAB init:
+    \begin{itemize}
+        \item set up Bully election mgmt object (as leader var)
+        \item    set up vars
+    \end{itemize}
+\item
+    Bully init:
+    \begin{itemize}
+        \item set up vars
+    \end{itemize}
 
-        Networking init:
-
-        ZAB init:
-                set up Bully election mgmt object (as leader var)
-                set up vars
-        Bully init:
-                set up vars
-
-        System init:
-                Set up vars,
-                Set up ZAB
-
-
+    System init:
+    \begin{itemize}
+        \item Set up vars
+        \item Set up ZAB
+    \end{itemize}
+\end{itemize}
 
     \subsubsection*{Process Failure \& Recovery}
         A failed process must be manually restarted in the terminal, as described in the \textbf{Instructions} section. On recovery, the process initializes as described in the \textbf{Initializaiton} subsection. As part of this initialization process, when it creates a new System object, it checks its local log file. If that file is not empty, it will process the json data within and "resend" each parsed message to itself to add it to its logical filesystem. There is a boolean flag that prevents these "resent" messages from being added to the disk log during this process.
@@ -86,7 +101,7 @@ Distributed Systems\\
 
 \subsection*{Algorithm Implementation}
     \subsubsection*{Zookeeper Atomic Broadcast}
-    Zookeeper Atomic Broadcast is implemented in Broadcasts.rs as a set of structures that maintain bookkeeping variables, message types, and message handling for the algorithm. Relatedly, there is also a Zxid struct, which contains a integer variables Epoch and Counter. ZAB structures are as follows:
+    Zookeeper Atomic Broadcast is implemented in \verb|broadcasts.rs| as a set of structures that maintain bookkeeping variables, message types, and message handling for the algorithm. Relatedly, there is also a Zxid struct, which contains a integer variables Epoch and Counter. ZAB structures are as follows:
 
 \begin{itemize}
     \item\textbf{ZabTypes}
@@ -101,7 +116,7 @@ Distributed Systems\\
 
 
     \subsubsection*{Bully Algorithm}
-    Leader election protocol is implemented in Broadcasts.rs as a set of structs that maintain bookkeeping variables, message types, and message handling for the Bully Algorithm.
+    Leader election protocol is implemented in \verb|broadcasts.rs| as a set of structs that maintain bookkeeping variables, message types, and message handling for the Bully Algorithm.
 
 \begin{itemize}
     \item\textbf{ZabTypes}
