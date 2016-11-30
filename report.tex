@@ -12,12 +12,17 @@ Distributed Systems\\
 \end{center}
 
 \subsection*{Language and Resources}
-    This program uses Rust. Libraries and refrences that we used to build the program are as follows:
-	\begin{itemize}
-	    \item Avi's Project 1 networking code: \verb|https://github.com/aweinstock314/weinsa_westem_distributedsystems_project1|
-	    \item Tokio:
-	    \item (other rust libraries?:)
-	\end{itemize}
+    This program uses Rust. Libraries (``crates'' in Rust's terminology) and references that we used to build the program are as follows:
+\begin{itemize}
+    \item Avi's Project 1 networking code: \verb|https://github.com/aweinstock314/weinsa_westem_distributedsystems_project1|
+    \item The \verb|tokio-core| crate is Rust's main library for asynchronous IO. It builds upon \verb|mio| (a non-abstract wrapper around \verb|epoll(2)| on Linux and \verb|kqueue(2)| on BSD) and \verb|futures| (an abstraction of general asynchronous computations).
+    \item \verb|serde| provides serialization and deserialization. It hooks into the compiler to do static reflection over datastructures, and generates generic code (traits) that serializes/deserializes arbitrary protocols. \verb|serde_json| invokes this generic code to read/write JSON.
+    \item \verb|nom| is a parser combinators library (a way of writing parsers for custom formats, similar in purpose to \verb|flex|/\verb|bison| in C). It is used to define the format for \verb|nodes.txt|.
+    \item \verb|log| is a logging framework that provides the \{\verb|warn!|, \verb|info!|, \verb|debug!|, \verb|trace!|\} macros, which can be used to print log information of various verbosity levels. \verb|env_logger| is a backend in this framework that reads an environment variable to determine what to print, and prints to standard error with the log level prefixed to the lines.
+    \item \verb|argparse| provides an object-oriented builder for command-line argument parsing that generates a nicely-formated \verb|--help| command.
+    \item \verb|byteorder| provides convenience methods for reading/writing bytes from/to arrays (e.g. \verb|LittleEndian::write_u64(&mut buf, pid)| instead of a 3-5 line loop)
+    \item \verb|either| provides the \verb|Either| datatype and some convenience functions for working with it (this is in Haskell's standard library). 
+\end{itemize}
 \subsection*{Instructions}
     In a terminal window, navigate to the project root directory and run ./localdeploy.sh. This will launch (FANCY WINDOW THING). In a second terminal, enter screen -x. This shows (OTHER FANCY WINDOW THING.) You can use (KEY COMMANDS) to view the running output of each process.
 
@@ -134,7 +139,18 @@ Distributed Systems\\
 	\textbf{ERRATA:} This leader election process currently works during initialization of the program, but has bugs that prevent processes from consistently agreeing on an elected leader should that leader crash. 
 
 
-\subsection*{Networking (Tokio/Futures)}
+\subsection*{Networking}
+\subsubsection*{Historical context}
+The POSIX standard system calls for networking (e.g. \{\verb|socket(2)|, \verb|connect(2)|, \verb|bind(2)|, \verb|listen(2)|, \verb|accept(2)|\}) are all blocking by default.
+That is, while attempting to use a socket, the current thread cannot do anything else.
+Parallelism (either via threads with \verb|pthread_create(3)| or processes via \verb|fork(2)|) allows a server to use blocking system calls to service multiple clients at once, but incurs the overhead of context switches and costs a nontrivial amount of memory per task.
+The \verb|select(2)| and \verb|poll(2)| POSIX system calls allow a single thread to check multiple file descriptors for readiness (and hence service multiple clients per thread), but provided an interface that is O(n) in the number of open file descriptors, and cannot be backwards-compatibly changed to something more efficient.
+\verb|epoll(2)| (Linux-specific) and \verb|kqueue(2)| (BSD-specific) are system calls that provide the same functionality as \verb|select(2)|/\verb|poll(2)|, but are O(n) in the number of \underline{active} file descriptors (which is optimal).
+\subsubsection*{Rust libraries}
+The \verb|mio| crate provides a portable wrapper around \verb|epoll(2)|/\verb|kqueue(2)|, but still requires manually keeping track of which file descriptors the program expects to be notified of what types of readiness, and in what mode (``edge-triggered'' vs ``level-triggered'') to be notified.
+The \verb|futures| crate isn't directly networking related; it provides a concurrency abstraction of the same name.
+A future of a value is an object that represents an in-progress computation of a value.
+It provides various methods for composition (e.g. waiting for two computations to complete, applying a callback once a value is complete) that end up building a computation graph, which is executed in a state-machine-like fashion.
+\verb|tokio-core| bridges \verb|mio| and \verb|futures|: it provides leaf nodes for \verb|futures|'s computation graph that do socket communication via \verb|mio|.
 \subsubsection*{Failure Detection (Heartbeats)}
-
 \end{document}
