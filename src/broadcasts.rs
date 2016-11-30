@@ -171,7 +171,8 @@ impl<Pid: Debug+Eq+Hash+Copy+Ord> BullyState<Pid> {
         if let None = self.leader_pid {
             self.tick_counter += 1;
             // T time units
-            if self.tick_counter >= 1 {
+            if self.tick_counter >= 4 {
+                debug!("BullyState::tick({:?}): T time units passed", self);
                 // if haven't heard from anyone else, assume nobody higher exists to be leader. send coord to (lower) others. 
                 if self.recvd_okay == false {
                     self.leader_pid = Some(self.own_pid);
@@ -180,7 +181,8 @@ impl<Pid: Debug+Eq+Hash+Copy+Ord> BullyState<Pid> {
                 } 
             }
             // T' time units
-            if self.tick_counter >= 2 {
+            if self.tick_counter >= 5 {
+                debug!("BullyState::tick({:?}): T' time units passed", self);
                 // if it hits this, it should have recieved a coord message, but did not. start a new election.
                 if self.recvd_coord == false { 
                     return self.init();
@@ -313,15 +315,17 @@ impl<Pid: Eq+Hash+Copy+Debug+Ord, Msg: Clone+Debug> HandleMessage for Zab<Pid, M
         // If it recieves a leader election protocol, delegate
         if let ZabTypes::Election(ref underlying) = m.mtype {
             let was_holding_election = self.leader.leader_pid == None;
+            //let old_leader = self.leader.leader_pid;
             let bully_messages = self.leader.handle_message(underlying);
+            //let new_leader = self.leader.leader_pid;
             let still_holding_election = self.leader.leader_pid == None;
 
+            //let election_finished = old_leader != new_leader && new_leader != None;
             let election_finished = was_holding_election && !still_holding_election;
-            /*let mut election_finished = false;
-            if let BullyTypes::Coordinator = underlying.mtype {
+            /*if let BullyTypes::Coordinator = underlying.mtype {
                 election_finished = true;
-            }
-            election_finished |= bully_messages.iter().any(|&(_, ref m)| {
+            }*/
+            /*election_finished |= bully_messages.iter().any(|&(_, ref m)| {
                 if let BullyTypes::Coordinator = m.mtype {
                     true
                 } else {
