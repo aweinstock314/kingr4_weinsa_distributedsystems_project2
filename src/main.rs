@@ -2,13 +2,11 @@
 #![feature(proc_macro)]
 
 pub extern crate argparse;
-pub extern crate bincode;
 pub extern crate byteorder;
 pub extern crate either;
 pub extern crate env_logger;
 #[macro_use] pub extern crate futures;
 pub extern crate futures_cpupool;
-#[macro_use] pub extern crate lazy_static;
 #[macro_use] pub extern crate log;
 #[macro_use] pub extern crate nom;
 pub extern crate serde;
@@ -17,7 +15,6 @@ pub extern crate serde_json;
 pub extern crate tokio_core;
 
 pub use argparse::{ArgumentParser, Collect, Store};
-pub use bincode::SizeLimit;
 pub use byteorder::{ByteOrder, LittleEndian, ReadBytesExt, WriteBytesExt};
 pub use either::Either;
 pub use futures::stream::Stream;
