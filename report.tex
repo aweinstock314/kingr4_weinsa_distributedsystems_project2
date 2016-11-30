@@ -23,13 +23,13 @@ Distributed Systems\\
     \item \verb|byteorder| provides convenience methods for reading/writing bytes from/to arrays (e.g. \verb|LittleEndian::write_u64(&mut buf, pid)| instead of a 3-5 line loop)
     \item \verb|either| provides the \verb|Either| datatype and some convenience functions for working with it (this is in Haskell's standard library). 
 \end{itemize}
-\subsection*{Instructions}
-    In a terminal window, navigate to the project root directory and run ./localdeploy.sh. This will launch (FANCY WINDOW THING). In a second terminal, enter screen -x. This shows (OTHER FANCY WINDOW THING.) You can use (KEY COMMANDS) to view the running output of each process.
-
-    To connect to a process as a client, (TYPE THINGS.) Available commands are as follows: create <filename>, delete <filename>, read <filename>, append <filename> <data>.
-
-    To manually kill a process, (DO THIS SERIES OF THINGS.). To relaunch it, (DO THIS OTHER SERIES OF THINGS.)
-
+%\subsection*{Instructions}
+%    In a terminal window, navigate to the project root directory and run ./localdeploy.sh. This will launch (FANCY WINDOW THING). In a second terminal, enter screen -x. This shows (OTHER FANCY WINDOW THING.) You can use (KEY COMMANDS) to view the running output of each process.
+%
+%    To connect to a process as a client, (TYPE THINGS.) Available commands are as follows: create <filename>, delete <filename>, read <filename>, append <filename> <data>.
+%
+%    To manually kill a process, (DO THIS SERIES OF THINGS.). To relaunch it, (DO THIS OTHER SERIES OF THINGS.)
+%
 \subsection*{Program Structure}
     Six Rust files define the relative functionality for this program:
 	\begin{itemize}
@@ -88,7 +88,7 @@ Distributed Systems\\
 	    \begin{itemize}
 	        \item Bookkeeping variables are initialized (see \textbf{FileSystem}).
 	        \item If it doesn't exist already, a log.txt file is created on disk.
-	        \item If log.txt already has data, process fills the logical representation of its filesystem according to its contents. (see \textbf{Process Failure & Recovery}).
+	        \item If log.txt already has data, process fills the logical representation of its filesystem according to its contents. (see \textbf{Process Failure \& Recovery}).
 	    \end{itemize}
 	\end{itemize}
 
@@ -107,7 +107,7 @@ Distributed Systems\\
 	    \item\textbf{ZabMessages}
 	    ZabMessages is a struct that defines a set of data carried in each message. It passes along the pid of the message sender, the pid of the process the client is connected to, a message type (defined by ZabTypes), and a counter that is a Zxid object. 
 	    \item\textbf{Zab Struct}
-	    The Zab struct stores a set of bookkeeping variables for Zookeeper Atomic Broadcast implementation. It stores a ZXID for the process, to be incremented locally and passed along with messages it sends. It has an integer ack_count, which the leader uses to keep track of acknowledgements it recieves from followers during its two-phase commit process. It has a ZXID called next_msg, which increments to keep track of the next message ID in the system that should be delivered, and a msg_q to buffer messages waiting to be delivered, again as in a two-phase commit process. It stores a leader as a BullyState object, which it uses to initialize leader elections and store the leader process' PID. Finally, it stores its own PID, a HashSet of PIDs of other processes in the system, and deliver, which stores the function that gets called when a deliver is invoked. 
+	    The Zab struct stores a set of bookkeeping variables for Zookeeper Atomic Broadcast implementation. It stores a ZXID for the process, to be incremented locally and passed along with messages it sends. It has an integer \verb|ack_count|, which the leader uses to keep track of acknowledgements it recieves from followers during its two-phase commit process. It has a ZXID called \verb|next_msg|, which increments to keep track of the next message ID in the system that should be delivered, and a \verb|msg_q| to buffer messages waiting to be delivered, again as in a two-phase commit process. It stores a leader as a BullyState object, which it uses to initialize leader elections and store the leader process' PID. Finally, it stores its own PID, a HashSet of PIDs of other processes in the system, and deliver, which stores the function that gets called when a deliver is invoked. 
 	    \item\textbf{Zab HandleMessage}
 	    Zab HandleMessage is an implementation of the generic broadcast HandleMessage function for ZAB. HandleMessage matches against all types of ZabMessages and determines the appropriate behavior on receipt. This includes delivering messages when recieving a commit message from the leader, broadcasting a client request when recieving a forawrded message, and counting ack messages to determine whether or not to send commits to the group.
    	    \item\textbf{Zab BroadcastAlgorithm}
@@ -116,7 +116,7 @@ Distributed Systems\\
 
     Zab also contains implementations of a \verb|new| function, which handles its \textbf{Initialization}, and an \verb|internal_broadcast| function, which allows a process to send a message to itself. This is used by the leader when it broadcasts a commit message.
 
-    In execution, these structures allow the processes in the program to perform Zookkeeper Atomic Broadcast and maintain a consistent filesystem among them. When a client sends a request to a process, that request is forwarded to the leader. The leader then broadcasts it as a SendAll-type message. When a process recieves a SendAll message, it will store it in its msg_q and send an Ack to the leader. The leader increments its ack_count at each receipt, and when it recieves a majority acknowledgement it broadcasts a Commit message to everyone, inclduing itself. On receipt of the Commit message, a process invokes its ZAB \verb|deliver| function, and passes the message to its logical filesystem to be processed accordingly. 
+    In execution, these structures allow the processes in the program to perform Zookkeeper Atomic Broadcast and maintain a consistent filesystem among them. When a client sends a request to a process, that request is forwarded to the leader. The leader then broadcasts it as a SendAll-type message. When a process recieves a SendAll message, it will store it in its \verb|msg_q| and send an Ack to the leader. The leader increments its \verb|ack_count| at each receipt, and when it recieves a majority acknowledgement it broadcasts a Commit message to everyone, inclduing itself. On receipt of the Commit message, a process invokes its ZAB \verb|deliver| function, and passes the message to its logical filesystem to be processed accordingly. 
 
     \subsubsection*{Bully Algorithm}
     Leader election protocol is implemented in \verb|broadcasts.rs| as a set of structs that maintain bookkeeping variables, message types, and message handling for the Bully Algorithm.
@@ -127,9 +127,9 @@ Distributed Systems\\
 	    \item\textbf{BullyMessages}
 	    BullyMessages is a struct that defines a set of data carried in each message. It passes along the pid of the message sender, the pid of the process the client is connected to and a message type (defined by BullyTypes). BullyMessages are encapsulated in Election-type ZabMessages when sent between processes, as they are recieved by the Zab message handler first. 
 	    \item\textbf{BullyState}
-	    BullyState stores a set of bookkeeping variables for Bully Leader Election implementation. It stores a process' PID, a collectively recognized leader_pid, a counter that tracks Tick messages recieved, a HashSet of its neighbor processes, and booleans for whether or not a given process has recieved Okay or Coordinator messages. 
+	    BullyState stores a set of bookkeeping variables for Bully Leader Election implementation. It stores a process' PID, a collectively recognized \verb|leader_pid|, a counter that tracks Tick messages recieved, a HashSet of its neighbor processes, and booleans for whether or not a given process has recieved Okay or Coordinator messages. 
 
-	    Leader_pid is an Option object, which allows us to test whether or not there is a collectively recognized leader among processes. If this Option is None, the system is currently holding an election.
+	    Leader\_pid is an Option object, which allows us to test whether or not there is a collectively recognized leader among processes. If this Option is None, the system is currently holding an election.
 
 		BullyState also has an implementation of HandleMessage, used to process BullyMessages when they're recieved by the process. This is invoked by Zab's HandleMessage when the process recieves an Election ZabMessage. 
 	\end{itemize}
@@ -152,5 +152,10 @@ The \verb|futures| crate isn't directly networking related; it provides a concur
 A future of a value is an object that represents an in-progress computation of a value.
 It provides various methods for composition (e.g. waiting for two computations to complete, applying a callback once a value is complete) that end up building a computation graph, which is executed in a state-machine-like fashion.
 \verb|tokio-core| bridges \verb|mio| and \verb|futures|: it provides leaf nodes for \verb|futures|'s computation graph that do socket communication via \verb|mio|.
-\subsubsection*{Failure Detection (Heartbeats)}
+\subsubsection*{Our organization of these}
+\verb|server_main| creates two \verb|tokio_core::io::TcpListener| streams (one for clients to connect to, one for peers to connect to).
+It receives the ports to listen on from \verb|nodes.txt|.
+Both \verb|TcpListener|s forward the accepted sockets to a \verb|futures::mpsc::Receiver<ControlMessage>|, that has access to all the server state.
+\verb|ControlMessage|s are a datatype of our invention that is used for communicating within the process.
+Our \verb|ControlThread| datastructure stores the other algorithmic datastructures, and orchastrates funneling messages through the sockets via \verb|serde|.
 \end{document}
