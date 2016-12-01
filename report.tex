@@ -30,6 +30,13 @@ Distributed Systems\\
 %
 %    To manually kill a process, (DO THIS SERIES OF THINGS.). To relaunch it, (DO THIS OTHER SERIES OF THINGS.)
 %
+\subsection*{Instructions}
+    In a terminal window, navigate to the project root directory and run ./localdeploy.sh. This will launch  Screen. In a second terminal, enter screen -x. This shows a screen instance that shows all of the running servers. You can use CTRL+A+<process #> to view the running output of each server/process. 
+
+    To connect to a process as a client, type CTRL+A+ Available commands are as follows: create <filename>, delete <filename>, read <filename>, append <filename> <data>.
+
+    To manually kill a process, type CTRL+A+ and then CTRL+C. To relaunch it, press the "up" arrow key 
+
 \subsection*{Program Structure}
     Six Rust files define the relative functionality for this program:
 	\begin{itemize}
