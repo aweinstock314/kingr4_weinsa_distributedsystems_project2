@@ -360,7 +360,7 @@ impl<Pid: Eq+Hash+Copy+Debug+Ord, Msg: Clone+Debug> HandleMessage for Zab<Pid, M
                             *ac += 1;
                             *ac 
                         };
-                        if ac > (self.processes.len()/2) + 1 { // TODO - double check majority arithmetic?     
+                        if ac >= (self.processes.len()/2) + 1 { // TODO - double check majority arithmetic?     
                             // send commit to all, including self. (will follow protocol below) 
                             to_send.extend(self.internal_broadcast(m.initiator, ZabTypes::Commit));
                         }
